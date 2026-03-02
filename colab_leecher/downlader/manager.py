@@ -10,31 +10,24 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from colab_leecher.downlader.aria2 import aria2_Download, get_Aria2c_Name
 from colab_leecher.downlader.telegram import TelegramDownload, media_Identifier
 from colab_leecher.utility.variables import (
-    BOT,
-    Gdrive,
-    Transfer,
-    MSG,
-    Messages,
-    Aria2c,
-    BotTimes,
+    BOT, Gdrive, Transfer, MSG, Messages, Aria2c, BotTimes,
 )
 from colab_leecher.utility.helper import (
-    isYtdlComplete,
-    keyboard,
-    sysINFO,
-    is_google_drive,
-    is_mega,
-    is_terabox,
-    is_ytdl_link,
-    is_telegram,
+    isYtdlComplete, keyboard, sysINFO,
+    is_google_drive, is_mega, is_terabox, is_ytdl_link, is_telegram,
 )
 from colab_leecher.downlader.gdrive import (
-    build_service,
-    g_DownLoad,
-    get_Gfolder_size,
-    getFileMetadata,
-    getIDFromURL,
+    build_service, g_DownLoad, get_Gfolder_size, getFileMetadata, getIDFromURL,
 )
+
+
+async def _safe_edit(text):
+    """Edit status_msg safely — skip if None."""
+    try:
+        if MSG.status_msg:
+            await MSG.status_msg.edit_text(text=text, reply_markup=keyboard())
+    except Exception as e:
+        logging.debug(f"Status edit skipped: {e}")
 
 
 async def downloadManager(source, is_ytdl: bool):
@@ -44,10 +37,7 @@ async def downloadManager(source, is_ytdl: bool):
         for i, link in enumerate(source):
             await YTDL_Status(link, i + 1)
         try:
-            await MSG.status_msg.edit_text(
-                text=Messages.task_msg + Messages.status_head + message + sysINFO(),
-                reply_markup=keyboard(),
-            )
+            await _safe_edit(Messages.task_msg + Messages.status_head + message + sysINFO())
         except Exception:
             pass
         while not isYtdlComplete():
@@ -62,39 +52,20 @@ async def downloadManager(source, is_ytdl: bool):
                 elif is_ytdl_link(link):
                     await YTDL_Status(link, i + 1)
                     try:
-                        await MSG.status_msg.edit_text(
-                            text=Messages.task_msg
-                            + Messages.status_head
-                            + message
-                            + sysINFO(),
-                            reply_markup=keyboard(),
-                        )
+                        await _safe_edit(Messages.task_msg + Messages.status_head + message + sysINFO())
                     except Exception:
                         pass
                     while not isYtdlComplete():
                         await sleep(2)
                 elif is_mega(link):
-                    executor = ProcessPoolExecutor()
-                    # await loop.run_in_executor(executor, megadl, link, i + 1)
                     await megadl(link, i + 1)
                 elif is_terabox(link):
                     tera_dn = f"<b>PLEASE WAIT ⌛</b>\n\n__Generating Download Link For__\n\n<code>{link}</code>"
-                    try:
-                        await MSG.status_msg.edit_text(
-                            text=tera_dn + sysINFO(), reply_markup=keyboard()
-                        )
-                    except Exception as e1:
-                        print(f"Couldn't Update text ! Because: {e1}")
-
+                    await _safe_edit(tera_dn + sysINFO())
                     await terabox_download(link, i + 1)
                 else:
                     aria2_dn = f"<b>PLEASE WAIT ⌛</b>\n\n__Getting Download Info For__\n\n<code>{link}</code>"
-                    try:
-                        await MSG.status_msg.edit_text(
-                            text=aria2_dn + sysINFO(), reply_markup=keyboard()
-                        )
-                    except Exception as e1:
-                        print(f"Couldn't Update text ! Because: {e1}")
+                    await _safe_edit(aria2_dn + sysINFO())
                     Aria2c.link_info = False
                     await aria2_Download(link, i + 1)
             except Exception as Error:
@@ -104,7 +75,6 @@ async def downloadManager(source, is_ytdl: bool):
 
 
 async def calDownSize(sources):
-    global TRANSFER_INFO
     for link in natsorted(sources):
         if is_google_drive(link):
             await build_service()
@@ -128,8 +98,7 @@ async def calDownSize(sources):
         elif is_telegram(link):
             media, _ = await media_Identifier(link)
             if media is not None:
-                size = media.file_size
-                Transfer.total_down_size += size
+                Transfer.total_down_size += media.file_size
             else:
                 logging.error("Couldn't Download Telegram Message")
         else:
@@ -137,7 +106,6 @@ async def calDownSize(sources):
 
 
 async def get_d_name(link: str):
-    global Messages, Gdrive
     if len(BOT.Options.custom_name) != 0:
         Messages.download_name = BOT.Options.custom_name
         return
@@ -147,12 +115,10 @@ async def get_d_name(link: str):
         Messages.download_name = meta["name"]
     elif is_telegram(link):
         media, _ = await media_Identifier(link)
-        Messages.download_name = media.file_name if hasattr(media, "file_name") else "None"  # type: ignore
+        Messages.download_name = media.file_name if hasattr(media, "file_name") else "None"
     elif is_ytdl_link(link):
         Messages.download_name = await get_YT_Name(link)
     elif is_mega(link):
-        Messages.download_name = (
-            "Don't Know 🥲 (Trying)"  # TODO: Get download name via megadl
-        )
+        Messages.download_name = "Don't Know 🥲 (Trying)"
     else:
         Messages.download_name = get_Aria2c_Name(link)
