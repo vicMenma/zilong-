@@ -1,6 +1,5 @@
 from time import time
 from datetime import datetime
-from pyrogram.types import Message
 
 
 class BOT:
@@ -54,6 +53,7 @@ class Transfer:
     total_down_size = 0
     sent_file = []
     sent_file_names = []
+    completion_info = None
 
 
 class TaskError:
@@ -86,9 +86,8 @@ class Paths:
     access_token = "/content/token.pickle"
 
 
-
 class Messages:
-    caution_msg = "\n\n<i>💖 When I'm Doin This, Do Something Else ! <b>Because, Time Is Precious ✨</b></i>"
+    caution_msg = ""
     download_name = ""
     task_msg = ""
     status_head = f"<b>📥 DOWNLOADING » </b>\n"
@@ -98,9 +97,8 @@ class Messages:
 
 
 class MSG:
-    sent_msg = Message(id=1)
-    status_msg = Message(id=2)
-
+    sent_msg   = None   # set after first upload
+    status_msg = None   # set after first status message
 
 
 class Aria2c:

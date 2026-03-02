@@ -16,7 +16,7 @@ from colab_leecher import OWNER, colab_bot
 from colab_leecher.downlader.manager import calDownSize, get_d_name, downloadManager
 from colab_leecher.channel_manager import kb_channel_select, get_channels
 from colab_leecher.utility.helper import (
-    _SEP, _field,
+    _SEP, _field, _bar_ui,
     getSize, applyCustomName, keyboard, sysINFO,
     is_ytdl_link, queue_card, completion_card, error_card,
     sizeUnit, getTime,
