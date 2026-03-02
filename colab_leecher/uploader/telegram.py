@@ -33,20 +33,26 @@ def _build_caption(name_part: str, is_last: bool) -> str:
     """Build file caption. Last file gets completion info embedded."""
     base = f"<b>{name_part}</b>"
     if is_last and hasattr(Transfer, "completion_info") and Transfer.completion_info:
-        ci  = Transfer.completion_info
-        dur = getTime(ci.get("duration", 0))
-        sz  = sizeUnit(ci.get("final_sz", 0))
+        ci    = Transfer.completion_info
+        # Compute real elapsed duration at caption-build time (not pre-stored 0)
+        start = ci.get("_start")
+        if start:
+            duration = int((datetime.now() - start).total_seconds())
+        else:
+            duration = ci.get("duration", 0)
+        dur  = getTime(duration)
+        sz   = sizeUnit(ci.get("final_sz", 0))
         reduction = ""
-        orig = ci.get("orig_sz", 0)
+        orig  = ci.get("orig_sz", 0)
         final = ci.get("final_sz", 0)
         if orig > 0 and final > 0 and final != orig:
             pct  = (1 - final / orig) * 100
-            sign = "🔻" if pct > 0 else "🔺"
+            sign = "\U0001f53b" if pct > 0 else "\U0001f53a"
             reduction = f"  {sign} {abs(pct):.0f}%"
         Transfer.completion_info = None
         return (
             f"{base}\n\n"
-            f"✅ <b>DONE</b>  ·  {sz}  ·  ⏱ {dur}{reduction}"
+            f"\u2705 DONE  \u00b7  {sz}  \u00b7  \u23f1 {dur}{reduction}"
         )
     return base
 
