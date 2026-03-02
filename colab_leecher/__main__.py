@@ -57,15 +57,13 @@ async def start(client, message):
     await message.delete()
     await ensure_dispatcher()
     caption = (
-        f"{_TOP}\n"
-        f"{_line('⚡ VIDEO STUDIO AI // CORE v4.2')}\n"
-        f"{_MID}\n"
-        f"{_row('🟢 STATUS', 'ONLINE')}\n"
-        f"{_row('👤 USER', message.from_user.first_name[:20])}\n"
-        f"{_row('💎 PLAN', 'PRO')}\n"
-        f"{_row('🔁 PARALLEL', '3 slots')}\n"
-        f"\n"
-        f"{_line('Send link · /help for commands')}\n"
+        f"⚡ <b>VIDEO STUDIO AI  //  CORE v4.2</b>\n"
+        f"{_SEP}\n\n"
+        f"{_field('🟢', 'STATUS', 'ONLINE')}\n"
+        f"{_field('👤', 'USER', message.from_user.first_name[:20])}\n"
+        f"{_field('💎', 'PLAN', 'PRO')}\n"
+        f"{_field('🔁', 'PARALLEL', '3 slots')}\n\n"
+        f"<i>Send link  ·  /help for commands</i>\n"
         f"{_SEP}"
     )
     kb = InlineKeyboardMarkup([[
