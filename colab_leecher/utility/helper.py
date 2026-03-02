@@ -18,33 +18,32 @@ from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths
 #  FUTURISTIC DARK THEME — design system
 # ══════════════════════════════════════════════
 
-_TOP    = "╔══════════════════════════════════╗"
-_MID    = "╠══════════════════════════════════╣"
-_BOT    = "╚══════════════════════════════════╝"
-_ROW    = "║  {:<32}║"
-_EMPTY  = "║                                  ║"
-_SEP = "──────────────────"
+_SEP    = "──────────────────────────────────"
+_WIDTH  = 32
+
+# Legacy aliases kept so imports in __main__.py do not break
+_TOP   = _SEP
+_MID   = _SEP
+_BOT   = _SEP
+_EMPTY = ""
 
 def _h(emoji: str, title: str) -> str:
     return f"{emoji} <b>{title}</b>\n{_SEP}"
 
 def _field(emoji: str, label: str, value: str) -> str:
     return f"{emoji} <b>{label}</b>  <code>{value}</code>"
-_SEP    = "──────────────────────────────────"
-_WIDTH  = 32   # inner width
 
 def _row(label: str, value: str) -> str:
-    content = f"{label}: {value}"
-    if len(content) > _WIDTH:
-        content = content[:_WIDTH - 1] + "…"
-    return f"║  {content:<{_WIDTH}}║"
+    """Dash-style row — no box characters."""
+    return f"{label}  <code>{value}</code>"
 
 def _line(text: str = "") -> str:
+    """Dash-style line — just the text, no box characters."""
     if not text:
-        return _EMPTY
+        return ""
     if len(text) > _WIDTH:
-        text = text[:_WIDTH - 1] + "…"
-    return f"║  {text:<{_WIDTH}}║"
+        text = text[:_WIDTH - 1] + "\u2026"
+    return text
 
 def _bar_ui(pct: float, width: int = 18) -> str:
     filled = int(min(pct, 100) / 100 * width)

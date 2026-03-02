@@ -229,14 +229,13 @@ async def _run_job(job: dict, slot_id: int):
             applyCustomName()
 
             # ── Process ───────────────────────────
-            # Store completion info so uploader can embed it in the final file caption
+            # _start stored so _build_caption can compute real elapsed time at upload moment
             Transfer.completion_info = {
                 "fname":    Messages.download_name or (source[0].split("/")[-1] if source else "?"),
                 "orig_sz":  Transfer.total_down_size,
-                "final_sz": Transfer.total_down_size,   # updated after zip/convert
-                "duration": 0,                           # filled after
+                "final_sz": Transfer.total_down_size,   # updated for zip modes
                 "mode":     mode_type,
-                "_start":   start_time,
+                "_start":   start_time,                 # real start — duration computed at caption time
             }
             if is_zip:
                 await Zip_Handler(Paths.down_path, True, True)
@@ -251,21 +250,12 @@ async def _run_job(job: dict, slot_id: int):
                 await Leech(Paths.temp_zpath, True)
             else:
                 await Leech(Paths.down_path, True)
-            # Finalise duration
-            Transfer.completion_info["duration"] = int(
-                (datetime.now() - start_time).total_seconds()
-            )
 
             # ── Success ───────────────────────────
             duration = int((datetime.now() - start_time).total_seconds())
             final_sz = Transfer.total_down_size
             fname    = Messages.download_name or (source[0].split("/")[-1] if source else "?")
             add_history(fname, final_sz, mode_type, "ok", duration)
-
-            # Update final size/duration in completion_info for the uploader
-            if Transfer.completion_info:
-                Transfer.completion_info["final_sz"] = final_sz
-                Transfer.completion_info["duration"]  = duration
             # Delete progress status — completion shown in last file caption
             try:
                 await MSG.status_msg.delete()
@@ -387,14 +377,14 @@ async def ensure_dispatcher():
 
 async def taskScheduler():
     """
-    Legacy entry point (mode single direct).
-    Called from __main__ when user selects a mode.
-    Wrapped as a single job through the new queue.
+    Entry point called from __main__ when user selects a mode.
+    Always routes through queue + dispatcher — never calls _run_job directly.
+    This prevents double-execution when the callback fires multiple times.
     """
     await ensure_dispatcher()
 
     job = {
-        "source":   BOT.SOURCE,
+        "source":   list(BOT.SOURCE),   # snapshot to avoid shared-reference bugs
         "mode":     BOT.Mode.mode,
         "type":     BOT.Mode.type,
         "ytdl":     BOT.Mode.ytdl,
@@ -404,18 +394,12 @@ async def taskScheduler():
     }
 
     active = active_count()
-    if active < MAX_PARALLEL:
-        # Direct launch (no queue card needed)
-        slot = id(job) % 10000
-        task = get_event_loop().create_task(_run_job(job, slot))
-        _active_tasks.append(task)
-        BOT.State.task_going = True
-        await task
-        BOT.State.task_going = active_count() > 0
-    else:
-        # Enqueue and show queue card
-        pos = enqueue(job)
+    enqueue(job)
+    BOT.State.task_going = True
+
+    if active >= MAX_PARALLEL:
+        # All slots busy — show position card
+        pos   = queue_size()
         label = (job["source"][0] if job["source"] else "?")[:24]
-        card  = queue_card(pos, pos + active_count(), label)
+        card  = queue_card(pos, pos + active, label)
         await colab_bot.send_message(chat_id=OWNER, text=card)
-        BOT.State.task_going = True
