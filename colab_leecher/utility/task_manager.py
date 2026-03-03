@@ -16,7 +16,7 @@ from colab_leecher import OWNER, colab_bot
 from colab_leecher.downlader.manager import calDownSize, get_d_name, downloadManager
 from colab_leecher.channel_manager import kb_channel_select, get_channels
 from colab_leecher.utility.helper import (
-    _SEP, _field, _bar_ui,
+    _SEP, _field,
     getSize, applyCustomName, keyboard, sysINFO,
     is_ytdl_link, queue_card, completion_card, error_card,
     sizeUnit, getTime,
@@ -25,45 +25,13 @@ from colab_leecher.utility.handler import (
     Leech, Unzip_Handler, Zip_Handler, SendLogs, cancelTask,
 )
 from colab_leecher.utility.variables import (
-    BOT, MSG, BotTimes, Messages, Paths, Transfer, TaskError,
+    BOT, MSG, BotTimes, Messages, Paths, Transfer, TaskError, _slot_status_msg,
 )
 
 MAX_PARALLEL = 3
 _active_tasks: list  = []   # asyncio.Task objects
 _queue:        list  = []   # pending job dicts
 _history:      list  = []   # completed job dicts (max 50)
-_slot_msgs:    dict  = {}   # slot_id -> status_msg object
-_slot_state:   dict  = {}   # slot_id -> {name, pct, speed, status, done, left}
-_shared_msg          = None  # single shared status message for all slots
-
-
-async def _update_shared_panel():
-    """Rebuild and edit the single shared status message from all slot states."""
-    global _shared_msg
-    if not _slot_state:
-        return
-    lines = ["⚡ <b>VIDEO STUDIO AI</b>  //  CORE v4.2", _SEP, ""]
-    for sid in sorted(_slot_state.keys()):
-        s = _slot_state[sid]
-        bar = _bar_ui(float(s.get("pct", 0)), 16)
-        lines.append(
-            f"🔹 <b>Slot {sid+1}</b>  {s.get('name','?')[:28]}\n"
-            f"   <code>[{bar}]</code>  <b>{s.get('pct',0):.0f}%</b>  ·  "
-            f"🚀 {s.get('speed','?')}  ·  ⏱ {s.get('eta','?')}\n"
-            f"   📦 {s.get('left','?')}  ·  ⚙ {s.get('status','?')}"
-        )
-        lines.append("")
-    lines.append(_SEP)
-    text = "\n".join(lines)
-    try:
-        if _shared_msg:
-            from pyrogram.errors import BadRequest
-            try:
-                await _shared_msg.edit_text(text, reply_markup=keyboard())
-            except BadRequest:
-                pass
-    except Exception as e:
-        logging.warning(f"Panel update: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -103,25 +71,6 @@ def active_count():
 
 
 # ──────────────────────────────────────────────
-#  Slot status message
-# ──────────────────────────────────────────────
-
-async def _send_slot_status(slot_id: int, text: str, kb=None):
-    """Crée ou édite le message de statut pour un slot donné."""
-    msg = _slot_msgs.get(slot_id)
-    try:
-        if msg:
-            await msg.edit_text(text, reply_markup=kb)
-        else:
-            sent = await colab_bot.send_message(
-                chat_id=OWNER, text=text, reply_markup=kb
-            )
-            _slot_msgs[slot_id] = sent
-    except Exception as e:
-        logging.debug(f"Slot msg {slot_id}: {e}")
-
-
-# ──────────────────────────────────────────────
 #  Core task runner (un job = une coroutine)
 # ──────────────────────────────────────────────
 
@@ -130,7 +79,6 @@ async def _run_job(job: dict, slot_id: int):
     Exécute un job complet avec retry (3x) et cleanup.
     job keys: source, mode, type, ytdl, name, zip_pw, unzip_pw
     """
-    global _shared_msg
     source    = job["source"]
     mode_type = job.get("type", "normal")
     is_ytdl   = job.get("ytdl", False)
@@ -176,42 +124,19 @@ async def _run_job(job: dict, slot_id: int):
             makedirs(down)
             Paths.down_path = down
 
-            # ── Status message ─────────────────────
+            # ── Status message — each slot gets its own ─────
             job_label = (source[0] if source else "?")[:40]
-            if attempt > 1 or not MSG.status_msg:
-                prefix = f"🔁 <b>RETRY {attempt}/{MAX_RETRY}</b>" if attempt > 1 else "🟠 <b>STARTING</b>"
-                sent = await colab_bot.send_message(
-                    chat_id=OWNER,
-                    text=f"{prefix}  ·  {mode_type.upper()}\n{_SEP}\n\n{_field('📁', 'Job', job_label)}",
-                    reply_markup=keyboard(),
-                )
-            else:
-                sent = MSG.status_msg
-                try:
-                    await sent.edit_text(
-                        f"🟠 <b>STARTING</b>  ·  {mode_type.upper()}\n{_SEP}\n\n{_field('📁', 'Job', job_label)}",
-                        reply_markup=keyboard(),
-                    )
-                except Exception:
-                    pass
-            _slot_msgs[slot_id] = sent
-            MSG.status_msg       = sent
-            # Register slot in shared state
-            _slot_state[slot_id] = {
-                "name": (source[0].split("/")[-1] if source else "?")[:28],
-                "pct": 0, "speed": "?", "eta": "?",
-                "status": "INIT", "done": "0B", "left": "?",
-            }
-            # First slot creates the shared panel; others reuse it
-            if _shared_msg is None:
-                _shared_msg = sent
-                MSG.status_msg = sent
-            else:
-                # Delete this slot's individual msg — we use the shared panel
-                try: await sent.delete()
-                except Exception: pass
-                MSG.status_msg = _shared_msg
-            BotTimes.start_time  = start_time
+            prefix = f"🔁 <b>RETRY {attempt}/{MAX_RETRY}</b>" if attempt > 1 else "🟠 <b>STARTING</b>"
+            slot_status_msg = await colab_bot.send_message(
+                chat_id=OWNER,
+                text=f"{prefix}  ·  Slot {slot_id}  ·  {mode_type.upper()}\n{_SEP}\n\n{_field('📁', 'Job', job_label)}",
+                reply_markup=keyboard(),
+            )
+            # Set per-slot ContextVar — each parallel task edits its OWN message
+            _slot_status_msg.set(slot_status_msg)
+            # Also set global as fallback for non-parallel code paths
+            MSG.status_msg = slot_status_msg
+            BotTimes.start_time   = start_time
             BotTimes.current_time = time()
 
             # ── Download size ─────────────────────
@@ -258,7 +183,7 @@ async def _run_job(job: dict, slot_id: int):
             add_history(fname, final_sz, mode_type, "ok", duration)
             # Delete progress status — completion shown in last file caption
             try:
-                await MSG.status_msg.delete()
+                await slot_status_msg.delete()
             except Exception:
                 pass
 
@@ -284,11 +209,6 @@ async def _run_job(job: dict, slot_id: int):
             # ── Cleanup ───────────────────────────
             if ospath.exists(work):
                 shutil.rmtree(work)
-            _slot_msgs.pop(slot_id, None)
-            _slot_state.pop(slot_id, None)
-            # If no more slots, clear shared panel ref
-            if not _slot_state:
-                _shared_msg = None
             return  # success → exit retry loop
 
         except asyncio.CancelledError:
@@ -308,7 +228,7 @@ async def _run_job(job: dict, slot_id: int):
                     suggestion="Check source or retry"
                 )
                 try:
-                    try: await MSG.status_msg.delete()
+                    try: await slot_status_msg.delete()
                     except Exception: pass
                     await colab_bot.send_message(chat_id=OWNER, text=err_text)
                 except Exception:
@@ -329,8 +249,10 @@ async def _run_job(job: dict, slot_id: int):
                         f"{_field('⏳', 'Wait', f'{wait}s')}\n\n"
                         f"{_SEP}"
                     )
-                    if MSG.status_msg:
-                        await MSG.status_msg.edit_text(retry_text)
+                    try:
+                        await slot_status_msg.edit_text(retry_text)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
                 await sleep(wait)

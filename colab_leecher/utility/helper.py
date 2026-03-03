@@ -12,7 +12,7 @@ from colab_leecher import colab_bot
 from pyrogram.errors import BadRequest
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths
+from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths, _slot_status_msg
 
 # ══════════════════════════════════════════════
 #  FUTURISTIC DARK THEME — design system
@@ -296,8 +296,10 @@ async def status_bar(down_msg, speed, percentage, eta, done, left, engine):
     )
 
     try:
-        if isTimeOver() and MSG.status_msg:
-            await MSG.status_msg.edit_text(
+        # Use per-slot ContextVar if set, otherwise fall back to global MSG
+        _target = _slot_status_msg.get() or MSG.status_msg
+        if isTimeOver() and _target:
+            await _target.edit_text(
                 text=text,
                 disable_web_page_preview=True,
                 reply_markup=keyboard(),

@@ -1,5 +1,9 @@
 from time import time
 from datetime import datetime
+from contextvars import ContextVar
+
+# Per-task status message — each parallel slot has its own
+_slot_status_msg: ContextVar = ContextVar('slot_status_msg', default=None)
 
 
 class BOT:
