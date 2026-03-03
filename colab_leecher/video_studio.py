@@ -42,7 +42,7 @@ _WORK_DIR = "/content/zilong_vstudio"
 
 def _safe_url(url: str) -> str:
     """Encode brackets and special chars that break aria2c."""
-    return quote(url, safe=":/?=&%+@#.,!~*'();$-_")
+    return quote(url, safe=":/?=&%+@#.,!~*'();$-_%")
 
 
 RES_MAP = {
@@ -168,6 +168,26 @@ async def _download_url(url: str, dest: str, status_msg=None) -> str:
     return dest
 
 
+async def _download_tg_file(message, dest_dir: str, status_msg=None) -> str:
+    """Download a Telegram file message to dest_dir. Returns local path."""
+    makedirs(dest_dir, exist_ok=True)
+    media = message.video or message.document or message.audio
+    if not media:
+        raise RuntimeError("No downloadable media in message")
+    fname = getattr(media, "file_name", None) or f"file_{media.file_id[-8:]}.mp4"
+    dest  = ospath.join(dest_dir, fname)
+    if status_msg:
+        try:
+            await status_msg.edit_text(
+                f"⬇️ <b>DOWNLOADING FROM TELEGRAM...</b>\n{_SEP}\n\n"
+                f"{_field('📁', 'File', fname[:40])}\n\n<i>Please wait...</i>"
+            )
+        except Exception:
+            pass
+    await message.download(file_name=dest)
+    return dest
+
+
 async def _run_ffmpeg(cmd: list, status_msg=None, status_text: str = "⚙️ Processing...") -> None:
     """Run ffmpeg command, editing status_msg while waiting."""
     if status_msg:
@@ -201,7 +221,12 @@ async def _do_compress(chat_id: int):
     vid_out = f"{_WORK_DIR}/compressed_{chat_id}.mp4"
 
     try:
-        await _download_url(url, vid_in, status)
+        if st.get("use_tg_file") and st.get("file_message"):
+            vid_in = await _download_tg_file(st["file_message"], _WORK_DIR, status)
+            # re-point vid_in and vid_out with correct ext
+            vid_out = ospath.join(_WORK_DIR, f"compressed_{chat_id}{ospath.splitext(vid_in)[1]}")
+        else:
+            await _download_url(url, vid_in, status)
         orig_sz = ospath.getsize(vid_in)
 
         await _run_ffmpeg([
@@ -261,7 +286,11 @@ async def _do_resolution(chat_id: int):
     vid_out = f"{_WORK_DIR}/res_{res}_{chat_id}.mp4"
 
     try:
-        await _download_url(url, vid_in, status)
+        if st.get("use_tg_file") and st.get("file_message"):
+            vid_in  = await _download_tg_file(st["file_message"], _WORK_DIR, status)
+            vid_out = ospath.join(_WORK_DIR, f"res_{res}_{chat_id}{ospath.splitext(vid_in)[1]}")
+        else:
+            await _download_url(url, vid_in, status)
         orig_sz = ospath.getsize(vid_in)
 
         await _run_ffmpeg([
@@ -311,8 +340,12 @@ async def _do_burnsub(chat_id: int):
     vid_out  = f"{_WORK_DIR}/burned_{chat_id}.mp4"
 
     try:
-        # Download both files
-        await _download_url(video_url, vid_in, status)
+        # Download video (from Telegram or URL) + subtitle URL
+        if st.get("use_tg_file") and st.get("file_message"):
+            vid_in  = await _download_tg_file(st["file_message"], _WORK_DIR, status)
+            vid_out = ospath.join(_WORK_DIR, f"burned_{chat_id}{ospath.splitext(vid_in)[1]}")
+        else:
+            await _download_url(video_url, vid_in, status)
         await _download_url(sub_url, sub_in, status)
 
         orig_sz = ospath.getsize(vid_in)

@@ -491,7 +491,39 @@ async def setFix(client, message):
 @colab_bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_file_vstudio(client, message):
     if not _owner(message): return
-    await vstudio_handle_file(message.chat.id, message)
+    # If a vstudio op is already active (e.g. forward), let it consume the file
+    from colab_leecher.video_studio import _vs_state
+    st = _vs_state.get(message.chat.id, {})
+    if st.get("op") == "forward":
+        await vstudio_handle_file(message.chat.id, message)
+        return
+    # Otherwise show the video ops picker for the uploaded file
+    media = message.video or message.document or message.audio
+    if not media:
+        return
+    fname = getattr(media, "file_name", None) or "uploaded_file"
+    # Store file message id so we can download it later via Telegram
+    from colab_leecher.video_studio import _vs_state as _vss, kb_quality, kb_resolution, kb_back
+    from colab_leecher.utility.helper import _SEP, _field
+    _vss[message.chat.id] = {
+        "op":           None,
+        "file_message": message,
+        "status_msg":   None,
+    }
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📉 Compress",   callback_data="vf_compress"),
+         InlineKeyboardButton("📐 Resolution", callback_data="vf_resolution"),
+         InlineKeyboardButton("💬 Burn Subs",  callback_data="vf_burnsub")],
+        [InlineKeyboardButton("📨 Re-upload",  callback_data="vf_forward"),
+         InlineKeyboardButton("✖ Cancel",      callback_data="vs_close")],
+    ])
+    msg = await message.reply_text(
+        f"🎬 <b>VIDEO FILE RECEIVED</b>\n{_SEP}\n\n"
+        f"{_field('📁', 'File', fname[:40])}\n\n"
+        f"<b>What do you want to do?</b>",
+        reply_markup=kb,
+    )
+    _vss[message.chat.id]["status_msg"] = msg
 
 # ══════════════════════════════════════════════
 #  Réception lien
@@ -499,11 +531,14 @@ async def handle_file_vstudio(client, message):
 def _mode_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Normal",      callback_data="normal"),
-         InlineKeyboardButton("🗜 Compresser",  callback_data="zip")],
-        [InlineKeyboardButton("📂 Extraire",    callback_data="unzip"),
-         InlineKeyboardButton("♻️ UnDoubleZip", callback_data="undzip")],
-        [InlineKeyboardButton("🎞 Streams",     callback_data="sx_open"),
          InlineKeyboardButton("➕ Add Queue",   callback_data="add_queue")],
+        [InlineKeyboardButton("🗜 Archive",     callback_data="zip"),
+         InlineKeyboardButton("📂 Extraire",    callback_data="unzip"),
+         InlineKeyboardButton("♻️ UnDoubleZip", callback_data="undzip")],
+        [InlineKeyboardButton("🎞 Streams",     callback_data="sx_open")],
+        [InlineKeyboardButton("📉 Compress",    callback_data="vop_compress"),
+         InlineKeyboardButton("📐 Resolution",  callback_data="vop_resolution"),
+         InlineKeyboardButton("💬 Burn Subs",   callback_data="vop_burnsub")],
     ])
 
 # vstudio plain-text step handler (fires only when a vs session is active)
@@ -697,6 +732,59 @@ async def callbacks(client, cq):
         )
         return
 
+    # ── Video ops from mode picker ────────────
+    if data in ["vop_compress", "vop_resolution", "vop_burnsub"]:
+        op_map = {
+            "vop_compress":   "compress",
+            "vop_resolution": "resolution",
+            "vop_burnsub":    "burnsub",
+        }
+        op = op_map[data]
+        url = (BOT.SOURCE[0] if BOT.SOURCE else None)
+
+        if not url:
+            await cq.answer("No URL found.", show_alert=True)
+            return
+
+        # Pre-fill video_url in vstudio state and jump straight to step 2
+        from colab_leecher.video_studio import _vs_state, kb_quality, kb_resolution, kb_back
+        _vs_state[chat_id] = {
+            "op":         op,
+            "video_url":  url,
+            "status_msg": cq.message,
+        }
+
+        if op == "compress":
+            try:
+                await cq.message.edit_text(
+                    f"🗜 <b>COMPRESS VIDEO</b>\n{_SEP}\n\n"
+                    f"{_field('🎬', 'URL', url[:40])}\n\n"
+                    f"<b>Pick quality:</b>",
+                    reply_markup=kb_quality(),
+                )
+            except Exception: pass
+
+        elif op == "resolution":
+            try:
+                await cq.message.edit_text(
+                    f"📐 <b>CHANGE RESOLUTION</b>\n{_SEP}\n\n"
+                    f"{_field('🎬', 'URL', url[:40])}\n\n"
+                    f"<b>Pick target resolution:</b>",
+                    reply_markup=kb_resolution(),
+                )
+            except Exception: pass
+
+        elif op == "burnsub":
+            try:
+                await cq.message.edit_text(
+                    f"💬 <b>BURN SUBTITLES</b>\n{_SEP}\n\n"
+                    f"{_field('🎬', 'Video', url[:40])}\n\n"
+                    f"<b>Send the subtitle URL (.srt/.ass):</b>",
+                    reply_markup=kb_back(),
+                )
+            except Exception: pass
+        return
+
     if data.startswith("sx_dl_"):
         session = get_session(chat_id)
         if not session: await cq.answer("Session expired.", show_alert=True); return
@@ -721,6 +809,59 @@ async def callbacks(client, cq):
         except Exception as e:
             logging.error(f"Stream DL: {e}")
             try: await cq.message.edit_text(error_card(str(e)[:40]))
+            except Exception: pass
+        return
+
+    # ── Video ops from uploaded file ─────────
+    if data in ["vf_compress", "vf_resolution", "vf_burnsub", "vf_forward"]:
+        from colab_leecher.video_studio import _vs_state as _vss, kb_quality, kb_resolution, kb_back, _do_compress, _do_resolution, _do_burnsub
+        st = _vss.get(chat_id, {})
+        file_msg = st.get("file_message")
+        status   = st.get("status_msg") or cq.message
+
+        if not file_msg:
+            await cq.answer("File session expired.", show_alert=True)
+            return
+
+        if data == "vf_forward":
+            try:
+                await file_msg.copy(chat_id=OWNER)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ {e}")
+            _vss.pop(chat_id, None)
+            return
+
+        op_map = {"vf_compress": "compress", "vf_resolution": "resolution", "vf_burnsub": "burnsub"}
+        op = op_map[data]
+        _vss[chat_id]["op"] = op
+        _vss[chat_id]["status_msg"] = cq.message
+        # For file ops we set a special flag so video_studio knows to download from Telegram
+        _vss[chat_id]["use_tg_file"] = True
+
+        if op == "compress":
+            try:
+                await cq.message.edit_text(
+                    f"🗜 <b>COMPRESS VIDEO</b>\n{_SEP}\n\n"
+                    f"<b>Pick quality:</b>",
+                    reply_markup=kb_quality(),
+                )
+            except Exception: pass
+        elif op == "resolution":
+            try:
+                await cq.message.edit_text(
+                    f"📐 <b>CHANGE RESOLUTION</b>\n{_SEP}\n\n"
+                    f"<b>Pick target resolution:</b>",
+                    reply_markup=kb_resolution(),
+                )
+            except Exception: pass
+        elif op == "burnsub":
+            try:
+                await cq.message.edit_text(
+                    f"💬 <b>BURN SUBTITLES</b>\n{_SEP}\n\n"
+                    f"<b>Send the subtitle URL (.srt/.ass):</b>",
+                    reply_markup=kb_back(),
+                )
             except Exception: pass
         return
 
