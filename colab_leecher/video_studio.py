@@ -16,6 +16,7 @@ import asyncio
 import subprocess
 import urllib.request
 from datetime import datetime
+from urllib.parse import quote
 from os import makedirs, path as ospath
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -38,6 +39,11 @@ from colab_leecher.utility.variables import MSG, Transfer
 _vs_state: dict = {}
 
 _WORK_DIR = "/content/zilong_vstudio"
+
+def _safe_url(url: str) -> str:
+    """Encode brackets and special chars that break aria2c."""
+    return quote(url, safe=":/?=&%+@#.,!~*'();$-_")
+
 
 RES_MAP = {
     "1080p": "1920:1080",
@@ -130,6 +136,7 @@ async def _edit(chat_id: int, text: str, kb=None):
 async def _download_url(url: str, dest: str, status_msg=None) -> str:
     """Download url to dest file using aria2c. Returns dest path."""
     makedirs(ospath.dirname(dest), exist_ok=True)
+    safe = _safe_url(url)
     cmd = [
         "aria2c",
         "--allow-overwrite=true",
@@ -139,7 +146,7 @@ async def _download_url(url: str, dest: str, status_msg=None) -> str:
         "--summary-interval=0",
         "-d", ospath.dirname(dest),
         "-o", ospath.basename(dest),
-        url,
+        safe,
     ]
     if status_msg:
         try:
