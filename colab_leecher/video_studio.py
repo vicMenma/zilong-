@@ -168,6 +168,23 @@ async def _download_url(url: str, dest: str, status_msg=None) -> str:
     return dest
 
 
+async def _get_duration(filepath: str) -> float:
+    """Get video duration in seconds using ffprobe."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            filepath,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return float(out.decode().strip())
+    except Exception:
+        return 0.0
+
+
 async def _download_tg_file(message, dest_dir: str, status_msg=None) -> str:
     """Download a Telegram file message to dest_dir. Returns local path."""
     makedirs(dest_dir, exist_ok=True)
@@ -188,23 +205,148 @@ async def _download_tg_file(message, dest_dir: str, status_msg=None) -> str:
     return dest
 
 
-async def _run_ffmpeg(cmd: list, status_msg=None, status_text: str = "⚙️ Processing...") -> None:
-    """Run ffmpeg command, editing status_msg while waiting."""
-    if status_msg:
+async def _run_ffmpeg(
+    cmd: list,
+    status_msg=None,
+    status_text: str = "⚙️ Processing...",
+    total_duration: float = 0.0,
+    label: str = "",
+) -> None:
+    """Run ffmpeg with real-time progress parsed from stderr.
+    
+    Shows live progress in the unified panel (if slot context is active)
+    or falls back to editing status_msg directly.
+    """
+    import re
+    import time
+    from colab_leecher.utility.variables import _panel_slots, _slot_id
+
+    # Add -progress pipe:1 -nostats to get machine-readable progress
+    # ffmpeg writes progress to stdout when -progress is set
+    full_cmd = []
+    # Insert -progress and -nostats before output file (last arg)
+    for i, arg in enumerate(cmd):
+        full_cmd.append(arg)
+    # We'll parse stderr for duration + time= lines instead (more compatible)
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    op_label   = label or status_text
+    start_time = time.time()
+    duration   = total_duration  # seconds, 0 = unknown
+    stderr_buf = []
+
+    # Regex patterns
+    re_duration = re.compile(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)")
+    re_time      = re.compile(r"time=(\d+):(\d+):(\d+\.?\d*)")
+    re_speed     = re.compile(r"speed=\s*([\d.]+)x")
+    re_size      = re.compile(r"size=\s*(\d+)kB")
+
+    # Get slot context for panel integration
+    try:
+        sid = _slot_id.get()
+    except Exception:
+        sid = None
+
+    async def _update_panel(pct, speed_str, eta_str, done_str):
+        """Push progress into unified panel slot or edit status_msg."""
+        if sid and sid in _panel_slots:
+            _panel_slots[sid].update({
+                "pct":    pct,
+                "speed":  speed_str,
+                "eta":    eta_str,
+                "done":   done_str,
+                "status": "PROCESSING",
+                "engine": "ffmpeg",
+                "name":   _panel_slots[sid].get("name", op_label),
+            })
+        elif status_msg:
+            bar_filled = int(pct / 5)
+            bar = "█" * bar_filled + "░" * (20 - bar_filled)
+            try:
+                await status_msg.edit_text(
+                    f"{op_label}\n{_SEP}\n\n"
+                    f"[{bar}] {pct:.1f}%\n"
+                    f"- Speed : {speed_str}\n"
+                    f"- ETA   : {eta_str}\n"
+                    f"- Done  : {done_str}"
+                )
+            except Exception:
+                pass
+
+    # Initial status
+    if sid and sid in _panel_slots:
+        _panel_slots[sid]["status"] = "PROCESSING"
+        _panel_slots[sid]["name"]   = op_label
+    elif status_msg:
         try:
             await status_msg.edit_text(
-                f"{status_text}\n{_SEP}\n\n<i>Please wait...</i>"
+                f"{op_label}\n{_SEP}\n\n"
+                f"[░░░░░░░░░░░░░░░░░░░░] 0%\n"
+                f"<i>Starting ffmpeg...</i>"
             )
         except Exception:
             pass
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
+
+    last_update = 0.0
+
+    while True:
+        line_bytes = await proc.stderr.readline()
+        if not line_bytes:
+            break
+        line = line_bytes.decode(errors="replace").strip()
+        stderr_buf.append(line)
+
+        # Parse total duration from ffmpeg header
+        if duration == 0:
+            m = re_duration.search(line)
+            if m:
+                h, mn, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
+                duration = h * 3600 + mn * 60 + s
+
+        # Parse progress time
+        m_time = re_time.search(line)
+        if m_time and duration > 0:
+            h, mn, s = float(m_time.group(1)), float(m_time.group(2)), float(m_time.group(3))
+            elapsed_encoded = h * 3600 + mn * 60 + s
+            pct = min((elapsed_encoded / duration) * 100, 99.9)
+
+            # Speed (e.g. 2.5x means encoding 2.5x real-time)
+            m_spd = re_speed.search(line)
+            speed_val = float(m_spd.group(1)) if m_spd else 0.0
+            speed_str = f"{speed_val:.1f}x" if speed_val > 0 else "..."
+
+            # ETA
+            if speed_val > 0 and duration > 0:
+                remaining = (duration - elapsed_encoded) / speed_val
+                eta_str = getTime(int(remaining))
+            else:
+                wall = time.time() - start_time
+                eta_str = getTime(int((wall / max(pct, 1)) * (100 - pct))) if pct > 0 else "..."
+
+            # Size processed
+            m_sz = re_size.search(line)
+            done_mb = (int(m_sz.group(1)) / 1024) if m_sz else 0
+            done_str = f"{done_mb:.1f} MB" if done_mb > 0 else "..."
+
+            # Throttle panel updates to every 2s
+            now = time.time()
+            if now - last_update >= 2.0:
+                last_update = now
+                await _update_panel(pct, speed_str, eta_str, done_str)
+
+    await proc.wait()
+
     if proc.returncode != 0:
-        raise RuntimeError(stderr.decode()[-300:])
+        err_text = "\n".join(stderr_buf[-15:])
+        raise RuntimeError(err_text[-400:])
+
+    # Mark 100% done
+    await _update_panel(100.0, "-", "Done", "✅")
 
 
 # ── operation runners ─────────────────────────
@@ -229,13 +371,33 @@ async def _do_compress(chat_id: int):
             await _download_url(url, vid_in, status)
         orig_sz = ospath.getsize(vid_in)
 
+        # Get video duration for progress bar
+        _dur = await _get_duration(vid_in)
+        fname = ospath.basename(vid_in)
+
+        # Register in unified panel if not already there
+        from colab_leecher.utility.variables import _panel_slots, _slot_id
+        from colab_leecher.utility.task_manager import _ensure_panel, _panel_lock, _panel_msg as _pm
+        sid = None
+        try: sid = _slot_id.get()
+        except Exception: pass
+        if not sid:
+            # Video op running outside download slot — create a dedicated panel entry
+            sid = f"vop_{chat_id}"
+            _panel_slots[sid] = {
+                "name": fname, "pct": 0, "speed": "...",
+                "eta": "...", "done": "...", "left": "",
+                "status": "PROCESSING", "engine": "ffmpeg",
+            }
+            await _ensure_panel(force_new=True)
+
         await _run_ffmpeg([
             "ffmpeg", "-y", "-i", vid_in,
             "-c:v", "libx264", "-crf", str(crf),
             "-preset", "fast",
             "-c:a", "aac", "-b:a", "128k",
             vid_out,
-        ], status, "🗜 <b>COMPRESSING...</b>")
+        ], status, f"🗜 Compressing · {fname[:30]}", total_duration=_dur, label=f"🗜 {fname[:35]}")
 
         final_sz = ospath.getsize(vid_out)
         duration = int((datetime.now() - start).total_seconds())
@@ -267,6 +429,10 @@ async def _do_compress(chat_id: int):
             try: await status.edit_text(error_card(str(e)[:50], "Check URL/format"))
             except Exception: pass
     finally:
+        from colab_leecher.utility.variables import _panel_slots
+        from colab_leecher.utility.task_manager import _remove_panel_if_empty
+        _panel_slots.pop(f"vop_{chat_id}", None)
+        await _remove_panel_if_empty()
         for f in (vid_in, vid_out):
             try: os.remove(f)
             except Exception: pass
@@ -292,6 +458,22 @@ async def _do_resolution(chat_id: int):
         else:
             await _download_url(url, vid_in, status)
         orig_sz = ospath.getsize(vid_in)
+
+        _dur = await _get_duration(vid_in)
+        fname = ospath.basename(vid_in)
+        from colab_leecher.utility.variables import _panel_slots, _slot_id
+        sid = None
+        try: sid = _slot_id.get()
+        except Exception: pass
+        if not sid:
+            sid = f"vop_{chat_id}"
+            _panel_slots[sid] = {
+                "name": fname, "pct": 0, "speed": "...",
+                "eta": "...", "done": "...", "left": "",
+                "status": "PROCESSING", "engine": "ffmpeg",
+            }
+            from colab_leecher.utility.task_manager import _ensure_panel
+            await _ensure_panel(force_new=True)
 
         await _run_ffmpeg([
             "ffmpeg", "-y", "-i", vid_in,
@@ -320,6 +502,10 @@ async def _do_resolution(chat_id: int):
             try: await status.edit_text(error_card(str(e)[:50], "Check URL/format"))
             except Exception: pass
     finally:
+        from colab_leecher.utility.variables import _panel_slots
+        from colab_leecher.utility.task_manager import _remove_panel_if_empty
+        _panel_slots.pop(f"vop_{chat_id}", None)
+        await _remove_panel_if_empty()
         for f in (vid_in, vid_out):
             try: os.remove(f)
             except Exception: pass
@@ -356,6 +542,22 @@ async def _do_burnsub(chat_id: int):
         esc = sub_in.replace("\\", "/").replace(":", "\\:")
         vf  = f"ass={esc}" if ext in (".ass", ".ssa") else f"subtitles={esc}"
 
+        _dur = await _get_duration(vid_in)
+        fname = ospath.basename(vid_in)
+        from colab_leecher.utility.variables import _panel_slots, _slot_id
+        sid = None
+        try: sid = _slot_id.get()
+        except Exception: pass
+        if not sid:
+            sid = f"vop_{chat_id}"
+            _panel_slots[sid] = {
+                "name": fname, "pct": 0, "speed": "...",
+                "eta": "...", "done": "...", "left": "",
+                "status": "PROCESSING", "engine": "ffmpeg",
+            }
+            from colab_leecher.utility.task_manager import _ensure_panel
+            await _ensure_panel(force_new=True)
+
         await _run_ffmpeg([
             "ffmpeg", "-y", "-i", vid_in,
             "-vf", vf,
@@ -363,7 +565,7 @@ async def _do_burnsub(chat_id: int):
             "-preset", "fast",
             "-c:a", "copy",
             vid_out,
-        ], status, "💬 <b>BURNING SUBTITLES...</b>")
+        ], status, f"💬 Burning subs · {fname[:30]}", total_duration=_dur, label=f"💬 {fname[:35]}")
 
         final_sz = ospath.getsize(vid_out)
         Transfer.completion_info = {
@@ -381,6 +583,10 @@ async def _do_burnsub(chat_id: int):
             try: await status.edit_text(error_card(str(e)[:50], "Check sub format/encoding"))
             except Exception: pass
     finally:
+        from colab_leecher.utility.variables import _panel_slots
+        from colab_leecher.utility.task_manager import _remove_panel_if_empty
+        _panel_slots.pop(f"vop_{chat_id}", None)
+        await _remove_panel_if_empty()
         for f in (vid_in, sub_in, vid_out):
             try: os.remove(f)
             except Exception: pass
