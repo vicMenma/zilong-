@@ -486,16 +486,8 @@ async def setFix(client, message):
         await message.delete()
 
 # ══════════════════════════════════════════════
-#  Video Studio — intercept text/file for step-by-step ops
+#  Video Studio — file handler for re-upload op
 # ══════════════════════════════════════════════
-@colab_bot.on_message(filters.text & filters.private & ~filters.command(["start","help","stats","ping","queue","history","schedule","cancel","stop","settings","setname","zipaswd","unzipaswd","vstudio","addchannel","removechannel","channels"]))
-async def handle_text_or_vstudio(client, message):
-    if not _owner(message): return
-    # Let vstudio consume it first if a session is active
-    if await vstudio_handle_text(message.chat.id, message.text or ""):
-        return
-    # Otherwise fall through to link handler (isLink filter handles it)
-
 @colab_bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_file_vstudio(client, message):
     if not _owner(message): return
@@ -514,9 +506,22 @@ def _mode_kb():
          InlineKeyboardButton("➕ Add Queue",   callback_data="add_queue")],
     ])
 
+# vstudio plain-text step handler (fires only when a vs session is active)
+from colab_leecher.video_studio import _vs_state as _vs_active
+def _is_vstudio_waiting(_, __, m):
+    return bool(m.text and _vs_active.get(m.chat.id, {}).get('op'))
+
+@colab_bot.on_message(filters.create(_is_vstudio_waiting) & filters.private)
+async def handle_vstudio_text(client, message):
+    if not _owner(message): return
+    await vstudio_handle_text(message.chat.id, message.text or "")
+
 @colab_bot.on_message(filters.create(isLink) & ~filters.photo & filters.private)
 async def handle_url(client, message):
     if not _owner(message): return
+    # If a video studio op is waiting for a URL, consume it there first
+    if await vstudio_handle_text(message.chat.id, message.text or ""):
+        return
     BOT.Options.custom_name = ""
     BOT.Options.zip_pswd    = ""
     BOT.Options.unzip_pswd  = ""
