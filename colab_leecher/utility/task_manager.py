@@ -86,10 +86,17 @@ async def _panel_loop():
                 pass
 
 
-async def _ensure_panel():
-    """Create the panel message if it doesn't exist yet."""
+async def _ensure_panel(force_new: bool = False):
+    """Send (or re-send) the unified panel so it appears at the bottom of chat."""
     global _panel_msg
     async with _panel_lock:
+        if _panel_msg is not None and force_new:
+            # Delete old panel so the new one appears at the bottom
+            try:
+                await _panel_msg.delete()
+            except Exception:
+                pass
+            _panel_msg = None
         if _panel_msg is None:
             _panel_msg = await colab_bot.send_message(
                 chat_id=OWNER,
@@ -176,7 +183,7 @@ async def _run_job(job: dict, slot_id: int):
         "done":   "0 B", "left": "?",
         "status": "STARTING", "engine": "—",
     }
-    await _ensure_panel()
+    await _ensure_panel(force_new=True)
     # Point ContextVar + global at the panel so status_bar() edits it
     _slot_status_msg.set(_panel_msg)
     _slot_id.set(slot_id)
