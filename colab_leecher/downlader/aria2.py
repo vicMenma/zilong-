@@ -14,7 +14,7 @@ def _safe_url(url: str) -> str:
     We only encode chars not already percent-encoded.
     """
     # quote everything except already-encoded sequences and safe URL chars
-    return quote(url, safe=":/?=&%+@#.,!~*'();$-_")
+    return quote(url, safe=":/?=&%+@#.,!~*'();$-_%")
 
 
 async def aria2_Download(link: str, num: int):
