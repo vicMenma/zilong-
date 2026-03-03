@@ -1,4 +1,5 @@
 import os
+import asyncio
 import shutil
 import logging
 import pathlib
@@ -257,4 +258,3 @@ async def change_resolution(video_path: str, out_path: str, target: str) -> str:
         raise RuntimeError(stderr.decode()[-300:])
     return out
 
-import asyncio

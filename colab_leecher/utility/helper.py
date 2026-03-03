@@ -265,10 +265,10 @@ def sysINFO():
     disk = psutil.disk_usage("/")
     cpu  = psutil.cpu_percent()
     return (
-        "\n"
-        f"║  🖥 CPU [{_pct_bar(cpu,8)}] {cpu:.0f}%{' '*(10-len(str(int(cpu))))}║\n"
-        f"║  💾 RAM {sizeUnit(ram):<26}║\n"
-        f"║  💿 DISK FREE {sizeUnit(disk.free):<20}║"
+        f"\n"
+        f"🖥 CPU  [{_pct_bar(cpu,8)}]  {cpu:.0f}%\n"
+        f"💾 RAM  {sizeUnit(ram)}\n"
+        f"💿 DISK FREE  {sizeUnit(disk.free)}"
     )
 
 # ══════════════════════════════════════════════
