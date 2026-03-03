@@ -5,6 +5,12 @@ from contextvars import ContextVar
 # Per-task status message — each parallel slot has its own
 _slot_status_msg: ContextVar = ContextVar('slot_status_msg', default=None)
 
+# Shared panel state dict — written by status_bar(), read by _panel_loop()
+# key = slot_id (int), value = dict with pct/speed/eta/done/left/engine
+# slot_id for current coroutine is stored via _slot_id ContextVar
+_slot_id: ContextVar = ContextVar('slot_id', default=0)
+_panel_slots: dict = {}   # slot_id -> panel state, updated by status_bar()
+
 
 class BOT:
     SOURCE = []

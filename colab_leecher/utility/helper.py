@@ -12,7 +12,7 @@ from colab_leecher import colab_bot
 from pyrogram.errors import BadRequest
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths, _slot_status_msg
+from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths, _slot_status_msg, _slot_id, _panel_slots
 
 # ══════════════════════════════════════════════
 #  FUTURISTIC DARK THEME — design system
@@ -295,19 +295,31 @@ async def status_bar(down_msg, speed, percentage, eta, done, left, engine):
         f"{_SEP}"
     )
 
-    try:
-        # Use per-slot ContextVar if set, otherwise fall back to global MSG
-        _target = _slot_status_msg.get() or MSG.status_msg
-        if isTimeOver() and _target:
-            await _target.edit_text(
-                text=text,
-                disable_web_page_preview=True,
-                reply_markup=keyboard(),
-            )
-    except BadRequest as e:
-        logging.debug(f"Status unchanged: {e}")
-    except Exception as e:
-        logging.warning(f"Status bar: {e}")
+    # Update the shared panel state so _panel_loop() renders it
+    sid = _slot_id.get()
+    if sid and sid in _panel_slots:
+        _panel_slots[sid].update({
+            "pct":    pct,
+            "speed":  speed,
+            "eta":    eta,
+            "done":   done,
+            "left":   left,
+            "engine": engine,
+        })
+    else:
+        # Fallback: directly edit the message (single-task or legacy path)
+        try:
+            _target = _slot_status_msg.get() or MSG.status_msg
+            if isTimeOver() and _target:
+                await _target.edit_text(
+                    text=text,
+                    disable_web_page_preview=True,
+                    reply_markup=keyboard(),
+                )
+        except BadRequest as e:
+            logging.debug(f"Status unchanged: {e}")
+        except Exception as e:
+            logging.warning(f"Status bar: {e}")
 
 # ══════════════════════════════════════════════
 #  COMPLETION CARD

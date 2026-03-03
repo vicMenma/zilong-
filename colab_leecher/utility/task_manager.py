@@ -3,8 +3,10 @@ task_manager.py
 ──────────────────────────────────────────────
 Queue système : jusqu'à 3 downloads en parallèle,
 les suivants attendent. Retry auto (3x). Resume.
+
+Single unified panel — one message shows all active slots,
+updated every 3 s by a background loop.
 """
-import pytz
 import shutil
 import logging
 import asyncio
@@ -16,22 +18,98 @@ from colab_leecher import OWNER, colab_bot
 from colab_leecher.downlader.manager import calDownSize, get_d_name, downloadManager
 from colab_leecher.channel_manager import kb_channel_select, get_channels
 from colab_leecher.utility.helper import (
-    _SEP, _field,
-    getSize, applyCustomName, keyboard, sysINFO,
-    is_ytdl_link, queue_card, completion_card, error_card,
+    _SEP, _field, _pct_bar,
+    getSize, applyCustomName, keyboard,
+    queue_card, error_card,
     sizeUnit, getTime,
 )
 from colab_leecher.utility.handler import (
     Leech, Unzip_Handler, Zip_Handler, SendLogs, cancelTask,
 )
 from colab_leecher.utility.variables import (
-    BOT, MSG, BotTimes, Messages, Paths, Transfer, TaskError, _slot_status_msg,
+    BOT, MSG, BotTimes, Messages, Paths, Transfer, TaskError,
+    _slot_status_msg, _slot_id, _panel_slots,
 )
 
 MAX_PARALLEL = 3
-_active_tasks: list  = []   # asyncio.Task objects
-_queue:        list  = []   # pending job dicts
-_history:      list  = []   # completed job dicts (max 50)
+_active_tasks: list = []
+_queue:        list = []
+_history:      list = []
+
+# ── Unified panel state ───────────────────────
+_panel_msg         = None
+_panel_lock        = asyncio.Lock()
+
+
+# ──────────────────────────────────────────────
+#  Panel rendering
+# ──────────────────────────────────────────────
+
+def _render_panel() -> str:
+    lines = ["⚡ <b>VIDEO STUDIO AI</b>  //  CORE v4.2", _SEP, ""]
+    if not _panel_slots:
+        lines.append("<i>No active tasks.</i>")
+    else:
+        for sid in sorted(_panel_slots.keys()):
+            s   = _panel_slots[sid]
+            pct = float(s.get("pct", 0))
+            bar = _pct_bar(pct, 16)
+            lines.append(
+                f"🔹 <b>Slot {sid}</b>  —  {s.get('name', '?')[:30]}\n"
+                f"   ⚙ {s.get('status','—')}  ·  💡 {s.get('engine','—')}\n"
+                f"   <code>[{bar}]</code>  <b>{pct:.0f}%</b>\n"
+                f"   🚀 {s.get('speed','?')}  ·  ⏱ ETA {s.get('eta','?')}\n"
+                f"   📦 {s.get('done','?')} / {s.get('left','?')}"
+            )
+            lines.append("")
+    lines.append(_SEP)
+    q = len(_queue)
+    if q:
+        lines.append(f"📋 <b>Queue:</b>  {q} waiting")
+    return "\n".join(lines)
+
+
+async def _panel_loop():
+    """Background task: edit the unified panel every 3 s."""
+    global _panel_msg
+    while True:
+        await sleep(3)
+        if not _panel_slots and _panel_msg is None:
+            continue
+        async with _panel_lock:
+            if _panel_msg is None:
+                continue
+            text = _render_panel()
+            try:
+                await _panel_msg.edit_text(text, reply_markup=keyboard())
+            except Exception:
+                pass
+
+
+async def _ensure_panel():
+    """Create the panel message if it doesn't exist yet."""
+    global _panel_msg
+    async with _panel_lock:
+        if _panel_msg is None:
+            _panel_msg = await colab_bot.send_message(
+                chat_id=OWNER,
+                text=_render_panel(),
+                reply_markup=keyboard(),
+            )
+            MSG.status_msg = _panel_msg
+
+
+async def _remove_panel_if_empty():
+    """Delete the panel message when all slots finish."""
+    global _panel_msg
+    async with _panel_lock:
+        if not _panel_slots and _panel_msg:
+            try:
+                await _panel_msg.delete()
+            except Exception:
+                pass
+            _panel_msg = None
+            MSG.status_msg = None
 
 
 # ──────────────────────────────────────────────
@@ -59,7 +137,6 @@ def get_history():
 # ──────────────────────────────────────────────
 
 def enqueue(job: dict):
-    """Ajoute un job à la file. Retourne sa position (1-indexed)."""
     _queue.append(job)
     return len(_queue)
 
@@ -71,14 +148,12 @@ def active_count():
 
 
 # ──────────────────────────────────────────────
-#  Core task runner (un job = une coroutine)
+#  Core task runner
 # ──────────────────────────────────────────────
 
 async def _run_job(job: dict, slot_id: int):
-    """
-    Exécute un job complet avec retry (3x) et cleanup.
-    job keys: source, mode, type, ytdl, name, zip_pw, unzip_pw
-    """
+    global _panel_msg
+
     source    = job["source"]
     mode_type = job.get("type", "normal")
     is_ytdl   = job.get("ytdl", False)
@@ -94,9 +169,18 @@ async def _run_job(job: dict, slot_id: int):
     attempt    = 0
     start_time = datetime.now()
 
-    import os as _os
-    _bdir      = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-    _ban_err   = _os.path.join(_bdir, "banner_error.jpg")
+    # Register slot in the shared panel
+    _panel_slots[slot_id] = {
+        "name":   (source[0].split("/")[-1] if source else "?")[:30],
+        "pct":    0, "speed": "—", "eta": "—",
+        "done":   "0 B", "left": "?",
+        "status": "STARTING", "engine": "—",
+    }
+    await _ensure_panel()
+    # Point ContextVar + global at the panel so status_bar() edits it
+    _slot_status_msg.set(_panel_msg)
+    _slot_id.set(slot_id)
+    MSG.status_msg = _panel_msg
 
     while attempt < MAX_RETRY:
         attempt += 1
@@ -124,43 +208,39 @@ async def _run_job(job: dict, slot_id: int):
             makedirs(down)
             Paths.down_path = down
 
-            # ── Status message — each slot gets its own ─────
-            job_label = (source[0] if source else "?")[:40]
-            prefix = f"🔁 <b>RETRY {attempt}/{MAX_RETRY}</b>" if attempt > 1 else "🟠 <b>STARTING</b>"
-            slot_status_msg = await colab_bot.send_message(
-                chat_id=OWNER,
-                text=f"{prefix}  ·  Slot {slot_id}  ·  {mode_type.upper()}\n{_SEP}\n\n{_field('📁', 'Job', job_label)}",
-                reply_markup=keyboard(),
-            )
-            # Set per-slot ContextVar — each parallel task edits its OWN message
-            _slot_status_msg.set(slot_status_msg)
-            # Also set global as fallback for non-parallel code paths
-            MSG.status_msg = slot_status_msg
             BotTimes.start_time   = start_time
             BotTimes.current_time = time()
+
+            _panel_slots[slot_id]["status"] = "GETTING INFO"
 
             # ── Download size ─────────────────────
             await calDownSize(source)
             if not Messages.download_name:
                 await get_d_name(source[0])
 
+            if Messages.download_name:
+                _panel_slots[slot_id]["name"] = Messages.download_name[:30]
+
             if is_zip:
                 Paths.down_path = ospath.join(Paths.down_path, Messages.download_name or "files")
                 makedirs(Paths.down_path, exist_ok=True)
+
+            _panel_slots[slot_id]["status"] = "DOWNLOADING"
 
             # ── Download ──────────────────────────
             await downloadManager(source, is_ytdl)
             Transfer.total_down_size = getSize(Paths.down_path)
             applyCustomName()
 
+            _panel_slots[slot_id]["status"] = "PROCESSING"
+
             # ── Process ───────────────────────────
-            # _start stored so _build_caption can compute real elapsed time at upload moment
             Transfer.completion_info = {
                 "fname":    Messages.download_name or (source[0].split("/")[-1] if source else "?"),
                 "orig_sz":  Transfer.total_down_size,
-                "final_sz": Transfer.total_down_size,   # updated for zip modes
+                "final_sz": Transfer.total_down_size,
                 "mode":     mode_type,
-                "_start":   start_time,                 # real start — duration computed at caption time
+                "_start":   start_time,
             }
             if is_zip:
                 await Zip_Handler(Paths.down_path, True, True)
@@ -181,11 +261,9 @@ async def _run_job(job: dict, slot_id: int):
             final_sz = Transfer.total_down_size
             fname    = Messages.download_name or (source[0].split("/")[-1] if source else "?")
             add_history(fname, final_sz, mode_type, "ok", duration)
-            # Delete progress status — completion shown in last file caption
-            try:
-                await slot_status_msg.delete()
-            except Exception:
-                pass
+
+            _panel_slots.pop(slot_id, None)
+            await _remove_panel_if_empty()
 
             # ── Channel copy prompt ───────────────
             sent_ids = [m.id for m in Transfer.sent_file if m]
@@ -209,7 +287,7 @@ async def _run_job(job: dict, slot_id: int):
             # ── Cleanup ───────────────────────────
             if ospath.exists(work):
                 shutil.rmtree(work)
-            return  # success → exit retry loop
+            return
 
         except asyncio.CancelledError:
             logging.info(f"Job slot {slot_id} cancelled")
@@ -217,63 +295,38 @@ async def _run_job(job: dict, slot_id: int):
                 Messages.download_name or "?", 0, mode_type, "cancelled",
                 int((datetime.now() - start_time).total_seconds())
             )
+            _panel_slots.pop(slot_id, None)
+            await _remove_panel_if_empty()
             return
 
         except Exception as e:
             logging.error(f"Job slot {slot_id} attempt {attempt} failed: {e}")
             if attempt >= MAX_RETRY:
-                # Final failure
-                err_text = error_card(
-                    reason=str(e)[:50],
-                    suggestion="Check source or retry"
-                )
-                try:
-                    try: await slot_status_msg.delete()
-                    except Exception: pass
-                    await colab_bot.send_message(chat_id=OWNER, text=err_text)
-                except Exception:
-                    pass
+                err_text = error_card(reason=str(e)[:50], suggestion="Check source or retry")
+                _panel_slots.pop(slot_id, None)
+                await _remove_panel_if_empty()
+                await colab_bot.send_message(chat_id=OWNER, text=err_text)
                 add_history(
                     Messages.download_name or "?", 0, mode_type, "error",
                     int((datetime.now() - start_time).total_seconds())
                 )
             else:
-                # Retry wait with backoff
                 wait = 5 * attempt
-                try:
-                    retry_text = (
-                        f"🔁 <b>RETRYING...</b>\n"
-                        f"{_SEP}\n\n"
-                        f"{_field('⚠', 'Error', str(e)[:40])}\n"
-                        f"{_field('🔁', 'Attempt', f'{attempt+1} / {MAX_RETRY}')}\n"
-                        f"{_field('⏳', 'Wait', f'{wait}s')}\n\n"
-                        f"{_SEP}"
-                    )
-                    try:
-                        await slot_status_msg.edit_text(retry_text)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+                _panel_slots[slot_id]["status"] = f"RETRY {attempt+1}/{MAX_RETRY} in {wait}s"
                 await sleep(wait)
 
 
 # ──────────────────────────────────────────────
-#  Queue dispatcher — tourne en fond
+#  Queue dispatcher
 # ──────────────────────────────────────────────
 
 async def _dispatcher():
-    """
-    Surveille la queue et lance les jobs en parallèle (max 3).
-    """
     slot_counter = 0
     while True:
-        # Clean finished tasks
         finished = [t for t in _active_tasks if t.done()]
         for t in finished:
             _active_tasks.remove(t)
 
-        # Launch pending jobs if slots available
         while _queue and len(_active_tasks) < MAX_PARALLEL:
             job = _queue.pop(0)
             slot_counter += 1
@@ -294,19 +347,15 @@ async def ensure_dispatcher():
     global _dispatcher_started
     if not _dispatcher_started:
         get_event_loop().create_task(_dispatcher())
+        get_event_loop().create_task(_panel_loop())
         _dispatcher_started = True
 
 
 async def taskScheduler():
-    """
-    Entry point called from __main__ when user selects a mode.
-    Always routes through queue + dispatcher — never calls _run_job directly.
-    This prevents double-execution when the callback fires multiple times.
-    """
     await ensure_dispatcher()
 
     job = {
-        "source":   list(BOT.SOURCE),   # snapshot to avoid shared-reference bugs
+        "source":   list(BOT.SOURCE),
         "mode":     BOT.Mode.mode,
         "type":     BOT.Mode.type,
         "ytdl":     BOT.Mode.ytdl,
@@ -320,7 +369,6 @@ async def taskScheduler():
     BOT.State.task_going = True
 
     if active >= MAX_PARALLEL:
-        # All slots busy — show position card
         pos   = queue_size()
         label = (job["source"][0] if job["source"] else "?")[:24]
         card  = queue_card(pos, pos + active, label)
