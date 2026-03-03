@@ -28,6 +28,10 @@ from colab_leecher.channel_manager import (
     get_channels, add_channel, remove_channel,
     kb_channel_select, kb_channel_manage,
 )
+from colab_leecher.video_studio import (
+    vstudio_open, vstudio_callback,
+    vstudio_handle_text, vstudio_handle_file,
+)
 from colab_leecher.stream_extractor import (
     analyse, get_session, clear_session,
     kb_type, kb_video, kb_audio, kb_subs,
@@ -47,7 +51,6 @@ def _owner(m): return m.chat.id == OWNER
 
 # pending video ops state per chat
 _video_ops: dict = {}   # chat_id -> {"path","name","op","sub_path"}
-_forward_mode: dict = {} # chat_id -> bool
 
 # ══════════════════════════════════════════════
 #  /start
@@ -93,8 +96,7 @@ async def help_cmd(client, message):
         f"⚙️ <b>Commands</b>\n"
         f"  /settings /stats /ping\n"
         f"  /queue /history /schedule\n"
-        f"  /cancel /stop /forward\n"
-        f"  /compress /resolution /burnsub\n\n"
+        f"  /cancel /stop /vstudio\n\n"
         f"🎛 <b>Link options</b>\n"
         f"  <code>[nom.ext]</code>  <code>{{zip}}</code>  <code>(unzip)</code>\n\n"
         f"🎞 <b>Streams</b> button on every link\n\n"
@@ -268,184 +270,13 @@ async def schedule_cmd(client, message):
     get_event_loop().create_task(_run_later())
 
 # ══════════════════════════════════════════════
-#  /forward  — forward un fichier Telegram
+#  /vstudio  — button-based Video Studio panel
 # ══════════════════════════════════════════════
-@colab_bot.on_message(filters.command("forward") & filters.private)
-async def forward_mode(client, message):
+@colab_bot.on_message(filters.command("vstudio") & filters.private)
+async def vstudio_cmd(client, message):
     if not _owner(message): return
-    _forward_mode[message.chat.id] = True
-    await message.reply_text(
-        f"📨 <b>FORWARD MODE</b>\n{_SEP}\n\n"
-        f"Send any file to re-upload.\n"
-        f"Bot will forward it to you.\n\n"
-        f"<code>● WAITING FOR FILE</code>\n\n{_SEP}"
-        f"{_SEP}"
-    )
-
-@colab_bot.on_message(filters.document & filters.private)
-async def handle_forward(client, message):
-    if not _owner(message): return
-    if not _forward_mode.get(message.chat.id): return
-    _forward_mode[message.chat.id] = False
-    msg = await message.reply_text(f"📨 <b>RE-UPLOADING...</b>\n{_SEP}")
-    try:
-        await message.forward(chat_id=OWNER)
-        await msg.edit_text(f"✅ <b>FILE FORWARDED</b>\n{_SEP}")
-    except Exception as e:
-        await msg.edit_text(error_card(str(e)[:40]))
-    await sleep(10)
-    try: await msg.delete()
-    except Exception: pass
-
-# ══════════════════════════════════════════════
-#  /compress  — compresser une vidéo
-# ══════════════════════════════════════════════
-@colab_bot.on_message(filters.command("compress") & filters.private)
-async def compress_cmd(client, message):
-    if not _owner(message): return
-    # Usage: /compress <url> [quality: high|medium|low]
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 2:
-        await message.reply_text(
-            f"🗜 <b>VIDEO COMPRESS</b>\n{_SEP}\n\n"
-            f"<b>Usage:</b>\n"
-            f"  <code>/compress &lt;url&gt; [high|med|low]</code>\n\n{_SEP}"
-            f"{_SEP}"
-        )
-        return
-
-    url     = parts[1].strip()
-    quality = parts[2].strip().lower() if len(parts) > 2 else "medium"
-    crf_map = {"high": 20, "med": 28, "medium": 28, "low": 35}
-    crf     = crf_map.get(quality, 28)
-
-    msg = await message.reply_text(
-        f"🗜 <b>COMPRESS QUEUED</b>\n{_SEP}\n\n"
-        f"{_field('📁', 'URL', url[:40])}\n"
-        f"{_field('⚙', 'Quality', quality.upper())}\n"
-        f"{_field('📊', 'CRF', str(crf))}\n\n{_SEP}"
-        f"{_SEP}"
-    )
-
-    job = {
-        "source":  [url], "mode":"leech", "type":"normal",
-        "ytdl":    is_ytdl_link(url), "name":"", "zip_pw":"", "unzip_pw":"",
-        "_post":   ("compress", crf),
-    }
-    enqueue(job)
-
-# ══════════════════════════════════════════════
-#  /resolution  — changer la résolution
-# ══════════════════════════════════════════════
-@colab_bot.on_message(filters.command("resolution") & filters.private)
-async def resolution_cmd(client, message):
-    if not _owner(message): return
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.reply_text(
-            f"📐 <b>CHANGE RESOLUTION</b>\n{_SEP}\n\n"
-            f"<b>Usage:</b>\n"
-            f"  <code>/resolution &lt;url&gt; &lt;res&gt;</code>\n"
-            f"  <i>1080p · 720p · 480p · 360p</i>\n\n{_SEP}"
-            f"{_SEP}"
-        )
-        return
-    url     = parts[1].strip()
-    res_str = parts[2].strip().lower()
-    res_map = {
-        "1080p":"1920:1080","1080":"1920:1080",
-        "720p":"1280:720",  "720":"1280:720",
-        "480p":"854:480",   "480":"854:480",
-        "360p":"640:360",   "360":"640:360",
-    }
-    target = res_map.get(res_str)
-    if not target:
-        await message.reply_text(f"❌ Résolution inconnue: {res_str}")
-        return
-
-    await message.reply_text(
-        f"📐 <b>RESOLUTION CHANGE</b>\n{_SEP}\n\n"
-        f"{_field('📁', 'URL', url[:40])}\n"
-        f"{_field('🎯', 'Target', res_str.upper())}\n\n{_SEP}"
-        f"{_SEP}"
-    )
-    job = {
-        "source":[url],"mode":"leech","type":"normal",
-        "ytdl":is_ytdl_link(url),"name":"","zip_pw":"","unzip_pw":"",
-        "_post":("resolution", target),
-    }
-    enqueue(job)
-
-# ══════════════════════════════════════════════
-#  /burnsub  — graver les sous-titres
-# ══════════════════════════════════════════════
-@colab_bot.on_message(filters.command("burnsub") & filters.private)
-async def burnsub_cmd(client, message):
-    if not _owner(message): return
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.reply_text(
-            f"💬 <b>BURN SUBTITLES</b>\n{_SEP}\n\n"
-            f"<b>Usage:</b>\n"
-            f"  <code>/burnsub &lt;video_url&gt; &lt;sub_url&gt;</code>\n\n{_SEP}"
-            f"{_SEP}"
-        )
-        return
-
-    video_url = parts[1].strip()
-    sub_url   = parts[2].strip()
-
-    await message.reply_text(
-        f"💬 <b>BURN SUBTITLES QUEUED</b>\n{_SEP}\n\n"
-        f"{_field('🎬', 'Video', video_url[:40])}\n"
-        f"{_field('💬', 'Subs', sub_url[:40])}\n\n{_SEP}"
-        f"{_SEP}"
-    )
-
-    async def _burn_job():
-        import tempfile, urllib.request
-        import os as _os
-        out_dir = "/content/zilong_burn"
-        _os.makedirs(out_dir, exist_ok=True)
-
-        status = await colab_bot.send_message(
-            chat_id=OWNER,
-            text=f"💬 <b>DOWNLOADING SUB...</b>\n{_SEP}"
-        )
-
-        # Download subtitle
-        sub_local = f"{out_dir}/sub.srt"
-        try:
-            urllib.request.urlretrieve(sub_url, sub_local)
-        except Exception as e:
-            await status.edit_text(error_card(f"Sub DL failed: {e}"[:40]))
-            return
-
-        await status.edit_text(
-            f"🗜 <b>BURNING SUBTITLES...</b>\n{_SEP}"
-        )
-
-        # Download video via aria2
-        import subprocess
-        vid_local = f"{out_dir}/video.mp4"
-        subprocess.run(["aria2c","-o",vid_local,video_url,"--allow-overwrite=true"],
-                      capture_output=True)
-
-        try:
-            out = await burn_subtitles(vid_local, sub_local, out_dir)
-        except Exception as e:
-            await status.edit_text(error_card(str(e)[:40], "Check codec/format"))
-            return
-
-        await status.edit_text(
-            f"📤 <b>UPLOADING BURNED VIDEO...</b>\n{_SEP}"
-        )
-        from colab_leecher.uploader.telegram import upload_file
-        await upload_file(out, _os.path.basename(out), is_last=True)
-        try: await status.delete()
-        except Exception: pass
-
-    get_event_loop().create_task(_burn_job())
+    await message.delete()
+    await vstudio_open(message)
 
 # ══════════════════════════════════════════════
 #  Commandes diverses
@@ -655,6 +486,22 @@ async def setFix(client, message):
         await message.delete()
 
 # ══════════════════════════════════════════════
+#  Video Studio — intercept text/file for step-by-step ops
+# ══════════════════════════════════════════════
+@colab_bot.on_message(filters.text & filters.private & ~filters.command(["start","help","stats","ping","queue","history","schedule","cancel","stop","settings","setname","zipaswd","unzipaswd","vstudio","addchannel","removechannel","channels"]))
+async def handle_text_or_vstudio(client, message):
+    if not _owner(message): return
+    # Let vstudio consume it first if a session is active
+    if await vstudio_handle_text(message.chat.id, message.text or ""):
+        return
+    # Otherwise fall through to link handler (isLink filter handles it)
+
+@colab_bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
+async def handle_file_vstudio(client, message):
+    if not _owner(message): return
+    await vstudio_handle_file(message.chat.id, message)
+
+# ══════════════════════════════════════════════
 #  Réception lien
 # ══════════════════════════════════════════════
 def _mode_kb():
@@ -713,6 +560,11 @@ async def handle_url(client, message):
 async def callbacks(client, cq):
     data    = cq.data
     chat_id = cq.message.chat.id
+
+    # ── Video Studio callbacks ────────────────
+    if data.startswith("vs_"):
+        await vstudio_callback(cq)
+        return
 
     if data == "stats_refresh":
         try: await cq.message.edit_text(_stats_text(), reply_markup=_STATS_KB)
