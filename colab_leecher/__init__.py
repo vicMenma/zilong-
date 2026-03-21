@@ -41,6 +41,10 @@ BOT_TOKEN = str(credentials["BOT_TOKEN"])
 OWNER = int(credentials["USER_ID"])
 DUMP_ID = str(credentials["DUMP_ID"])
 
+# ── CloudConvert webhook integration ──────────
+NGROK_TOKEN       = str(credentials.get("NGROK_TOKEN", ""))
+CC_WEBHOOK_SECRET = str(credentials.get("CC_WEBHOOK_SECRET", ""))
+
 log.info("Credentials loaded successfully")
 
 # Use uvloop as event loop policy

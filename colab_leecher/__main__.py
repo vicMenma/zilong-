@@ -7,7 +7,7 @@ from asyncio import sleep, get_event_loop
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from colab_leecher import colab_bot, OWNER
+from colab_leecher import colab_bot, OWNER, NGROK_TOKEN, CC_WEBHOOK_SECRET
 from colab_leecher.utility.handler import (
     cancelTask, burn_subtitles, compress_video, change_resolution,
 )
@@ -37,6 +37,7 @@ from colab_leecher.stream_extractor import (
     kb_type, kb_video, kb_audio, kb_subs,
     dl_video, dl_audio, dl_sub,
 )
+import colab_leecher.cloudconvert_hook as cc_hook
 
 
 # ── Banner image paths (generated at install time) ──
@@ -146,9 +147,6 @@ async def stats(client, message):
     await message.delete()
     await message.reply_text(_stats_text(), reply_markup=_STATS_KB)
 
-# ══════════════════════════════════════════════
-#  /ping
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("ping") & filters.private)
 async def ping(client, message):
     t0  = datetime.now()
@@ -160,19 +158,13 @@ async def ping(client, message):
     else:          q, fill = "POOR",         1
     bar = "▓" * fill + "░" * (12 - fill)
     await msg.edit_text(
-        f"🏓 <b>PONG</b>\n"
-        f"{_SEP}\n\n"
+        f"🏓 <b>PONG</b>\n{_SEP}\n\n"
         f"⚡ <b>Latency</b>  <code>{ms} ms</code>\n"
-        f"📶 <b>Quality</b>  {q}\n\n"
-        f"<code>[{bar}]</code>\n\n"
-        f"{_SEP}"
+        f"📶 <b>Quality</b>  {q}\n\n<code>[{bar}]</code>\n\n{_SEP}"
     )
     await sleep(20)
     await message_deleter(message, msg)
 
-# ══════════════════════════════════════════════
-#  /queue
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("queue") & filters.private)
 async def queue_cmd(client, message):
     if not _owner(message): return
@@ -180,28 +172,20 @@ async def queue_cmd(client, message):
     active = active_count()
     queued = queue_size()
     text = (
-        f"📋 <b>QUEUE STATUS</b>\n"
-        f"{_SEP}\n\n"
+        f"📋 <b>QUEUE STATUS</b>\n{_SEP}\n\n"
         f"{_field('⚙', 'Active', f'{active} / 3 slots')}\n"
         f"{_field('⏳', 'Waiting', str(queued))}\n\n"
-        f"{_SEP}\n"
-        f"💡 <i>Max 3 parallel downloads</i>"
+        f"{_SEP}\n💡 <i>Max 3 parallel downloads</i>"
     )
     await message.reply_text(text)
 
-# ══════════════════════════════════════════════
-#  /history
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("history") & filters.private)
 async def history_cmd(client, message):
     if not _owner(message): return
     await message.delete()
     records = get_history()
     if not records:
-        await message.reply_text(
-            f"📋 <b>HISTORY</b>\n{_SEP}\n\n"
-            f"<i>No records yet.</i>"
-        )
+        await message.reply_text(f"📋 <b>HISTORY</b>\n{_SEP}\n\n<i>No records yet.</i>")
         return
     lines = ["📋 <b>DOWNLOAD HISTORY</b>", _SEP]
     for i, r in enumerate(records[-10:], 1):
@@ -211,51 +195,37 @@ async def history_cmd(client, message):
         lines.append(f"    📦 {sizeUnit(r['size'])}")
         lines.append(f"    🕐 {r['time']}")
         lines.append(f"    ⏱ {r['duration']}")
-        
-    
     await message.reply_text("\n".join(lines))
 
-# ══════════════════════════════════════════════
-#  /schedule  — planifier un download
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("schedule") & filters.private)
 async def schedule_cmd(client, message):
     if not _owner(message): return
-    # Usage: /schedule HH:MM <url>
     parts = message.text.split(maxsplit=2)
     if len(parts) < 3:
         await message.reply_text(
-            f"📅 <b>SCHEDULER</b>\n{_SEP}\n\n"
-            f"<b>Usage:</b>\n"
+            f"📅 <b>SCHEDULER</b>\n{_SEP}\n\n<b>Usage:</b>\n"
             f"  <code>/schedule HH:MM &lt;url&gt;</code>\n"
             f"  <i>Ex: /schedule 03:30 https://...</i>\n\n{_SEP}"
-            f"{_SEP}"
         )
         return
-
     time_str = parts[1]
     url      = parts[2].strip()
     try:
         h, m = map(int, time_str.split(":"))
         now  = datetime.now()
         run_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if run_at <= now:
-            run_at += timedelta(days=1)
+        if run_at <= now: run_at += timedelta(days=1)
         delay = (run_at - now).total_seconds()
     except Exception:
         await message.reply_text("❌ Format invalide. Ex: /schedule 03:30 http://...")
         return
-
     label = url[:30]
-    text  = (
+    await message.reply_text(
         f"📅 <b>SCHEDULED</b>\n{_SEP}\n\n"
         f"{_field('🕐', 'Run at', time_str)}\n"
         f"{_field('⏳', 'In', getTime(delay))}\n"
         f"{_field('📁', 'URL', label)}\n\n{_SEP}"
-        f"{_SEP}"
     )
-    await message.reply_text(text)
-
     async def _run_later():
         await sleep(delay)
         job = {"source":[url],"mode":"leech","type":"normal","ytdl":is_ytdl_link(url),
@@ -263,171 +233,93 @@ async def schedule_cmd(client, message):
         enqueue(job)
         await colab_bot.send_message(
             chat_id=OWNER,
-            text=f"📅 <b>SCHEDULED JOB STARTED</b>\n{_SEP}\n\n"
-                 f"{_field('📁', 'URL', label)}\n\n{_SEP}"
+            text=f"📅 <b>SCHEDULED JOB STARTED</b>\n{_SEP}\n\n{_field('📁', 'URL', label)}\n\n{_SEP}"
         )
-
     get_event_loop().create_task(_run_later())
 
-# ══════════════════════════════════════════════
-#  /vstudio  — button-based Video Studio panel
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("vstudio") & filters.private)
 async def vstudio_cmd(client, message):
     if not _owner(message): return
     await message.delete()
     await vstudio_open(message)
 
-# ══════════════════════════════════════════════
-#  Commandes diverses
-# ══════════════════════════════════════════════
-
-# ══════════════════════════════════════════════
-#  /addchannel — save a channel for auto-copy
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("addchannel") & filters.private)
 async def addchannel_cmd(client, message):
     if not _owner(message): return
-    # Usage: /addchannel <channel_id> <label>
-    # channel_id can be @username or -100xxxxxxxxxx
     parts = message.text.split(maxsplit=2)
     if len(parts) < 3:
         await message.reply_text(
             f"📺 <b>ADD CHANNEL</b>\n{_SEP}\n\n"
             f"  <code>/addchannel &lt;id&gt; &lt;label&gt;</code>\n\n"
-            f"\n"
             f"<b>Examples:</b>\n"
             f"  <code>/addchannel -1001234567890 Anime</code>\n"
             f"  <code>/addchannel @mychannel Movies</code>\n\n"
-            f"\n"
             f"⚠️ <i>Bot must be admin in the channel</i>\n\n{_SEP}"
-            f"{_SEP}"
         )
         return
-
     raw_id = parts[1].strip()
     label  = parts[2].strip()
-
-    # Resolve @username to numeric ID
     try:
         if raw_id.startswith("@"):
             chat = await client.get_chat(raw_id)
-            channel_id = chat.id
-            ch_type    = "public"
+            channel_id = chat.id; ch_type = "public"
         else:
-            channel_id = int(raw_id)
-            ch_type    = "private"
+            channel_id = int(raw_id); ch_type = "private"
     except Exception as e:
-        await message.reply_text(
-            f"❌ <b>CHANNEL NOT FOUND</b>\n{_SEP}\n\n"
-            f"{_field('⚠', 'Error', str(e)[:40])}\n"
-            f"<i>Check ID or make bot admin</i>\n\n{_SEP}"
-        )
+        await message.reply_text(f"❌ <b>CHANNEL NOT FOUND</b>\n{_SEP}\n\n{_field('⚠', 'Error', str(e)[:40])}\n<i>Check ID or make bot admin</i>\n\n{_SEP}")
         return
-
-    # Test that bot can actually post there
     try:
-        test = await colab_bot.send_message(
-            chat_id=channel_id,
-            text="🤖 <i>Video Studio AI connected. Test message — will be deleted.</i>"
-        )
+        test = await colab_bot.send_message(chat_id=channel_id, text="🤖 <i>Video Studio AI connected. Test message — will be deleted.</i>")
         await test.delete()
     except Exception as e:
-        await message.reply_text(
-            f"❌ <b>CANNOT POST</b>\n{_SEP}\n\n"
-            f"{_field('⚠', 'Error', str(e)[:40])}\n"
-            f"<i>Make bot an admin first</i>\n\n{_SEP}"
-        )
+        await message.reply_text(f"❌ <b>CANNOT POST</b>\n{_SEP}\n\n{_field('⚠', 'Error', str(e)[:40])}\n<i>Make bot an admin first</i>\n\n{_SEP}")
         return
-
     added = add_channel(channel_id, label, ch_type)
     if added:
         icon = "📢" if ch_type == "public" else "🔒"
         await message.reply_text(
             f"✅ <b>CHANNEL SAVED</b>\n{_SEP}\n\n"
-            f"{_field(icon, 'Label', label)}\n"
-            f"{_field('🆔', 'ID', str(channel_id))}\n"
-            f"{_field('🔑', 'Type', ch_type.upper())}\n"
-            f"\n"
-            f"\n<i>Files will be copied here after each download.</i>\n\n{_SEP}"
-            f"{_SEP}"
+            f"{_field(icon, 'Label', label)}\n{_field('🆔', 'ID', str(channel_id))}\n{_field('🔑', 'Type', ch_type.upper())}\n\n"
+            f"<i>Files will be copied here after each download.</i>\n\n{_SEP}"
         )
     else:
-        await message.reply_text(
-            f"⚠️ <b>ALREADY SAVED</b>\n{_SEP}\n\n"
-            f"{_field('📺', 'Channel', label)}\n\n{_SEP}"
-        )
+        await message.reply_text(f"⚠️ <b>ALREADY SAVED</b>\n{_SEP}\n\n{_field('📺', 'Channel', label)}\n\n{_SEP}")
 
-
-# ══════════════════════════════════════════════
-#  /removechannel  — remove a saved channel
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("removechannel") & filters.private)
 async def removechannel_cmd(client, message):
     if not _owner(message): return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply_text(
-            f"🗑 <b>REMOVE CHANNEL</b>\n{_SEP}\n\n"
-            f"  <code>/removechannel &lt;id&gt;</code>\n\n{_SEP}"
-        )
+        await message.reply_text(f"🗑 <b>REMOVE CHANNEL</b>\n{_SEP}\n\n  <code>/removechannel &lt;id&gt;</code>\n\n{_SEP}")
         return
-    try:
-        channel_id = int(parts[1].strip())
-    except ValueError:
-        await message.reply_text("❌ Invalid ID — must be numeric.")
-        return
+    try: channel_id = int(parts[1].strip())
+    except ValueError: await message.reply_text("❌ Invalid ID — must be numeric."); return
     removed = remove_channel(channel_id)
-    if removed:
-        await message.reply_text(
-            f"✅ <b>CHANNEL REMOVED</b>\n{_SEP}\n\n"
-            f"{_field('🆔', 'ID', str(channel_id))}\n\n{_SEP}"
-        )
-    else:
-        await message.reply_text(
-            f"⚠️ <b>NOT FOUND</b>\n{_SEP}\n\n"
-            f"{_field('🆔', 'ID', str(channel_id))}\n\n{_SEP}"
-        )
+    if removed: await message.reply_text(f"✅ <b>CHANNEL REMOVED</b>\n{_SEP}\n\n{_field('🆔', 'ID', str(channel_id))}\n\n{_SEP}")
+    else: await message.reply_text(f"⚠️ <b>NOT FOUND</b>\n{_SEP}\n\n{_field('🆔', 'ID', str(channel_id))}\n\n{_SEP}")
 
-
-# ══════════════════════════════════════════════
-#  /channels  — list all saved channels
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.command("channels") & filters.private)
 async def channels_cmd(client, message):
     if not _owner(message): return
     await message.delete()
     channels = get_channels()
     if not channels:
-        await message.reply_text(
-            f"📺 <b>SAVED CHANNELS</b>\n{_SEP}\n\n"
-            f"<i>No channels saved yet.</i>\n"
-            f"\n"
-            f"<code>/addchannel &lt;id&gt; &lt;label&gt;</code>\n\n{_SEP}"
-        )
+        await message.reply_text(f"📺 <b>SAVED CHANNELS</b>\n{_SEP}\n\n<i>No channels saved yet.</i>\n\n<code>/addchannel &lt;id&gt; &lt;label&gt;</code>\n\n{_SEP}")
         return
     lines = ["📺 <b>SAVED CHANNELS</b>", _SEP]
     for c in channels:
         icon = "📢" if c["type"] == "public" else "🔒"
         lines.append(f"\n{icon} <b>{c['label']}</b>")
         lines.append(f"    🆔 <code>{c['id']}</code>")
-        
-    
-    await message.reply_text(
-        "\n".join(lines),
-        reply_markup=kb_channel_manage()
-    )
+    await message.reply_text("\n".join(lines), reply_markup=kb_channel_manage())
 
 @colab_bot.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client, message):
     if not _owner(message): return
     await message.delete()
-    if BOT.State.task_going:
-        await cancelTask("Annulé via /cancel")
+    if BOT.State.task_going: await cancelTask("Annulé via /cancel")
     else:
-        msg = await message.reply_text(
-            f"⚠️ <b>NO ACTIVE TASK</b>\n{_SEP}"
-        )
+        msg = await message.reply_text(f"⚠️ <b>NO ACTIVE TASK</b>\n{_SEP}")
         await sleep(8); await msg.delete()
 
 @colab_bot.on_message(filters.command("stop") & filters.private)
@@ -435,10 +327,7 @@ async def stop_bot(client, message):
     if not _owner(message): return
     await message.delete()
     if BOT.State.task_going: await cancelTask("Arrêt du bot")
-    await message.reply_text(
-        f"🛑 <b>SHUTTING DOWN</b>\n{_SEP}\n\n"
-        f"<i>All processes terminated.</i>\n\n{_SEP}"
-    )
+    await message.reply_text(f"🛑 <b>SHUTTING DOWN</b>\n{_SEP}\n\n<i>All processes terminated.</i>\n\n{_SEP}")
     await sleep(2); await client.stop(); os._exit(0)
 
 @colab_bot.on_message(filters.command("settings") & filters.private)
@@ -491,36 +380,25 @@ async def setFix(client, message):
 @colab_bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_file_vstudio(client, message):
     if not _owner(message): return
-    # If a vstudio op is already active (e.g. forward), let it consume the file
     from colab_leecher.video_studio import _vs_state
     st = _vs_state.get(message.chat.id, {})
     if st.get("op") == "forward":
         await vstudio_handle_file(message.chat.id, message)
         return
-    # Otherwise show the video ops picker for the uploaded file
     media = message.video or message.document or message.audio
-    if not media:
-        return
+    if not media: return
     fname = getattr(media, "file_name", None) or "uploaded_file"
-    # Store file message id so we can download it later via Telegram
     from colab_leecher.video_studio import _vs_state as _vss, kb_quality, kb_resolution, kb_back
-    from colab_leecher.utility.helper import _SEP, _field
-    _vss[message.chat.id] = {
-        "op":           None,
-        "file_message": message,
-        "status_msg":   None,
-    }
+    _vss[message.chat.id] = {"op": None, "file_message": message, "status_msg": None}
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📉 Compress",   callback_data="vf_compress"),
+        [InlineKeyboardButton("📉 Compress", callback_data="vf_compress"),
          InlineKeyboardButton("📐 Resolution", callback_data="vf_resolution"),
-         InlineKeyboardButton("💬 Burn Subs",  callback_data="vf_burnsub")],
-        [InlineKeyboardButton("📨 Re-upload",  callback_data="vf_forward"),
-         InlineKeyboardButton("✖ Cancel",      callback_data="vs_close")],
+         InlineKeyboardButton("💬 Burn Subs", callback_data="vf_burnsub")],
+        [InlineKeyboardButton("📨 Re-upload", callback_data="vf_forward"),
+         InlineKeyboardButton("✖ Cancel", callback_data="vs_close")],
     ])
     msg = await message.reply_text(
-        f"🎬 <b>VIDEO FILE RECEIVED</b>\n{_SEP}\n\n"
-        f"{_field('📁', 'File', fname[:40])}\n\n"
-        f"<b>What do you want to do?</b>",
+        f"🎬 <b>VIDEO FILE RECEIVED</b>\n{_SEP}\n\n{_field('📁', 'File', fname[:40])}\n\n<b>What do you want to do?</b>",
         reply_markup=kb,
     )
     _vss[message.chat.id]["status_msg"] = msg
@@ -530,18 +408,17 @@ async def handle_file_vstudio(client, message):
 # ══════════════════════════════════════════════
 def _mode_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Normal",      callback_data="normal"),
-         InlineKeyboardButton("➕ Add Queue",   callback_data="add_queue")],
-        [InlineKeyboardButton("🗜 Archive",     callback_data="zip"),
-         InlineKeyboardButton("📂 Extraire",    callback_data="unzip"),
+        [InlineKeyboardButton("📄 Normal", callback_data="normal"),
+         InlineKeyboardButton("➕ Add Queue", callback_data="add_queue")],
+        [InlineKeyboardButton("🗜 Archive", callback_data="zip"),
+         InlineKeyboardButton("📂 Extraire", callback_data="unzip"),
          InlineKeyboardButton("♻️ UnDoubleZip", callback_data="undzip")],
-        [InlineKeyboardButton("🎞 Streams",     callback_data="sx_open")],
-        [InlineKeyboardButton("📉 Compress",    callback_data="vop_compress"),
-         InlineKeyboardButton("📐 Resolution",  callback_data="vop_resolution"),
-         InlineKeyboardButton("💬 Burn Subs",   callback_data="vop_burnsub")],
+        [InlineKeyboardButton("🎞 Streams", callback_data="sx_open")],
+        [InlineKeyboardButton("📉 Compress", callback_data="vop_compress"),
+         InlineKeyboardButton("📐 Resolution", callback_data="vop_resolution"),
+         InlineKeyboardButton("💬 Burn Subs", callback_data="vop_burnsub")],
     ])
 
-# vstudio plain-text step handler (fires only when a vs session is active)
 from colab_leecher.video_studio import _vs_state as _vs_active
 def _is_vstudio_waiting(_, __, m):
     return bool(m.text and _vs_active.get(m.chat.id, {}).get('op'))
@@ -554,14 +431,9 @@ async def handle_vstudio_text(client, message):
 @colab_bot.on_message(filters.create(isLink) & ~filters.photo & filters.private)
 async def handle_url(client, message):
     if not _owner(message): return
-    # If a video studio op is waiting for a URL, consume it there first
-    if await vstudio_handle_text(message.chat.id, message.text or ""):
-        return
-    BOT.Options.custom_name = ""
-    BOT.Options.zip_pswd    = ""
-    BOT.Options.unzip_pswd  = ""
+    if await vstudio_handle_text(message.chat.id, message.text or ""): return
+    BOT.Options.custom_name = ""; BOT.Options.zip_pswd = ""; BOT.Options.unzip_pswd = ""
     await ensure_dispatcher()
-
     src = message.text.splitlines()
     for _ in range(3):
         if not src: break
@@ -570,26 +442,17 @@ async def handle_url(client, message):
         elif last.startswith("{") and last.endswith("}"): BOT.Options.zip_pswd    = last[1:-1]; src.pop()
         elif last.startswith("(") and last.endswith(")"): BOT.Options.unzip_pswd  = last[1:-1]; src.pop()
         else: break
-
-    BOT.SOURCE    = src
+    BOT.SOURCE = src
     BOT.Mode.ytdl = all(is_ytdl_link(l) for l in src if l.strip())
-    BOT.Mode.mode = "leech"
-    BOT.State.started = True
-
-    n     = len([l for l in src if l.strip()])
+    BOT.Mode.mode = "leech"; BOT.State.started = True
+    n = len([l for l in src if l.strip()])
     label = "🏮 YTDL" if BOT.Mode.ytdl else "🔗 LINK"
-    active = active_count()
-    queued = queue_size()
-
+    active = active_count(); queued = queue_size()
     text = (
-        f"⚡ <b>NEW JOB</b>\n"
-        f"{_SEP}\n\n"
-        f"{_field('📁', 'Sources', str(n))}\n"
-        f"{_field('🔗', 'Type', label)}\n"
-        f"{_field('⚙', 'Active', f'{active}/3')}\n"
-        f"{_field('📋', 'Queue', str(queued))}\n\n"
-        f"{_SEP}\n"
-        f"<b>Select processing mode:</b>"
+        f"⚡ <b>NEW JOB</b>\n{_SEP}\n\n"
+        f"{_field('📁', 'Sources', str(n))}\n{_field('🔗', 'Type', label)}\n"
+        f"{_field('⚙', 'Active', f'{active}/3')}\n{_field('📋', 'Queue', str(queued))}\n\n"
+        f"{_SEP}\n<b>Select processing mode:</b>"
     )
     await message.reply_text(text, reply_markup=_mode_kb(), quote=True)
 
@@ -601,10 +464,8 @@ async def callbacks(client, cq):
     data    = cq.data
     chat_id = cq.message.chat.id
 
-    # ── Video Studio callbacks ────────────────
     if data.startswith("vs_"):
-        await vstudio_callback(cq)
-        return
+        await vstudio_callback(cq); return
 
     if data == "stats_refresh":
         try: await cq.message.edit_text(_stats_text(), reply_markup=_STATS_KB)
@@ -615,173 +476,80 @@ async def callbacks(client, cq):
         records = get_history()
         last = records[-3:] if records else []
         lines = [f"📊 <b>ADVANCED LOGS</b>\n{_SEP}"]
-        if not last:
-            lines.append("\n<i>No logs yet.</i>")
+        if not last: lines.append("\n<i>No logs yet.</i>")
         for r in last:
             icon = "✅" if r["status"] == "ok" else "❌"
             lines.append(f"\n{icon} <b>{r['name'][:22]}</b>")
             lines.append(f"    🕐 {r['time']}  ·  <code>{r['status'].upper()}</code>")
-        try: await cq.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✖ Close", callback_data="close")
-        ]]))
+        try: await cq.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖ Close", callback_data="close")]]))
         except Exception: pass
         return
 
     if data in ["normal","zip","unzip","undzip"]:
-        BOT.Mode.type = data
-        BOT.State.started   = False
-        BotTimes.start_time = datetime.now()
+        BOT.Mode.type = data; BOT.State.started = False; BotTimes.start_time = datetime.now()
         try: await cq.message.delete()
         except Exception: pass
-        task = get_event_loop().create_task(taskScheduler())
-        BOT.TASK = task
-        return
+        task = get_event_loop().create_task(taskScheduler()); BOT.TASK = task; return
 
     if data == "add_queue":
-        # Add current SOURCE to queue without launching immediately
-        job = {
-            "source":   BOT.SOURCE,
-            "mode":     "leech",
-            "type":     "normal",
-            "ytdl":     BOT.Mode.ytdl,
-            "name":     BOT.Options.custom_name,
-            "zip_pw":   BOT.Options.zip_pswd,
-            "unzip_pw": BOT.Options.unzip_pswd,
-        }
+        job = {"source": BOT.SOURCE, "mode": "leech", "type": "normal", "ytdl": BOT.Mode.ytdl,
+               "name": BOT.Options.custom_name, "zip_pw": BOT.Options.zip_pswd, "unzip_pw": BOT.Options.unzip_pswd}
         pos = enqueue(job)
         label = (BOT.SOURCE[0] if BOT.SOURCE else "?")[:24]
-        await cq.message.edit_text(queue_card(pos, pos, label))
-        return
+        await cq.message.edit_text(queue_card(pos, pos, label)); return
 
-    # ── Stream extractor ──────────────────────
     if data == "sx_open":
         url = (BOT.SOURCE or [None])[0]
         if not url: await cq.answer("No URL.", show_alert=True); return
-        await cq.message.edit_text(
-            f"🎞 <b>STREAM EXTRACTOR</b>\n"
-            f"{_SEP}\n\n"
-            f"⏳ <i>Analysing streams...</i>\n"
-            f"<code>{url[:50]}</code>"
-        )
+        await cq.message.edit_text(f"🎞 <b>STREAM EXTRACTOR</b>\n{_SEP}\n\n⏳ <i>Analysing streams...</i>\n<code>{url[:50]}</code>")
         session = await analyse(url, chat_id)
         if not session or (not session["video"] and not session["audio"] and not session["subs"]):
-            await cq.message.edit_text(
-                error_card("No streams found", "Try yt-dlp source"),
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⏎ Back", callback_data="sx_back")
-                ]])
-            )
+            await cq.message.edit_text(error_card("No streams found", "Try yt-dlp source"),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏎ Back", callback_data="sx_back")]]))
             return
-        await _show_sx_menu(cq.message, session)
-        return
+        await _show_sx_menu(cq.message, session); return
 
     if data == "sx_type":
         session = get_session(chat_id)
         if not session: await cq.answer("Session expired.", show_alert=True); return
-        await _show_sx_menu(cq.message, session)
-        return
+        await _show_sx_menu(cq.message, session); return
 
     if data == "sx_video":
         session = get_session(chat_id)
         if not session or not session["video"]: await cq.answer("No video tracks.", show_alert=True); return
-        await cq.message.edit_text(
-            f"🎬 <b>VIDEO STREAMS</b>\n"
-            f"{_SEP}\n"
-            f"<i>flag · resolution · [codec] · size</i>\n\n"
-            f"Tap to download:",
-            reply_markup=kb_video(session)
-        )
-        return
+        await cq.message.edit_text(f"🎬 <b>VIDEO STREAMS</b>\n{_SEP}\n<i>flag · resolution · [codec] · size</i>\n\nTap to download:", reply_markup=kb_video(session)); return
 
     if data == "sx_audio":
         session = get_session(chat_id)
         if not session or not session["audio"]: await cq.answer("No audio tracks.", show_alert=True); return
-        await cq.message.edit_text(
-            f"🎵 <b>AUDIO STREAMS</b>\n"
-            f"{_SEP}\n"
-            f"<i>flag · language · [codec] · kbps · size</i>\n\n"
-            f"Tap to download:",
-            reply_markup=kb_audio(session)
-        )
-        return
+        await cq.message.edit_text(f"🎵 <b>AUDIO STREAMS</b>\n{_SEP}\n<i>flag · language · [codec] · kbps · size</i>\n\nTap to download:", reply_markup=kb_audio(session)); return
 
     if data == "sx_subs":
         session = get_session(chat_id)
         if not session or not session["subs"]: await cq.answer("No subtitles.", show_alert=True); return
-        await cq.message.edit_text(
-            f"💬 <b>SUBTITLE TRACKS</b>\n"
-            f"{_SEP}\n"
-            f"<i>flag · language · [format]</i>\n\n"
-            f"Tap to download:",
-            reply_markup=kb_subs(session)
-        )
-        return
+        await cq.message.edit_text(f"💬 <b>SUBTITLE TRACKS</b>\n{_SEP}\n<i>flag · language · [format]</i>\n\nTap to download:", reply_markup=kb_subs(session)); return
 
     if data == "sx_back":
         clear_session(chat_id)
         n = len([l for l in (BOT.SOURCE or []) if l.strip()])
         label = "🏮 YTDL" if BOT.Mode.ytdl else "🔗 LINK"
-        await cq.message.edit_text(
-            f"⚡ <b>NEW JOB</b>\n"
-            f"{_SEP}\n\n"
-            f"{_field('📁', 'Sources', str(n))}\n"
-            f"{_field('🔗', 'Type', label)}\n\n"
-            f"{_SEP}\n"
-            f"<b>Select processing mode:</b>",
-            reply_markup=_mode_kb()
-        )
-        return
+        await cq.message.edit_text(f"⚡ <b>NEW JOB</b>\n{_SEP}\n\n{_field('📁', 'Sources', str(n))}\n{_field('🔗', 'Type', label)}\n\n{_SEP}\n<b>Select processing mode:</b>", reply_markup=_mode_kb()); return
 
-    # ── Video ops from mode picker ────────────
     if data in ["vop_compress", "vop_resolution", "vop_burnsub"]:
-        op_map = {
-            "vop_compress":   "compress",
-            "vop_resolution": "resolution",
-            "vop_burnsub":    "burnsub",
-        }
+        op_map = {"vop_compress": "compress", "vop_resolution": "resolution", "vop_burnsub": "burnsub"}
         op = op_map[data]
         url = (BOT.SOURCE[0] if BOT.SOURCE else None)
-
-        if not url:
-            await cq.answer("No URL found.", show_alert=True)
-            return
-
-        # Pre-fill video_url in vstudio state and jump straight to step 2
+        if not url: await cq.answer("No URL found.", show_alert=True); return
         from colab_leecher.video_studio import _vs_state, kb_quality, kb_resolution, kb_back
-        _vs_state[chat_id] = {
-            "op":         op,
-            "video_url":  url,
-            "status_msg": cq.message,
-        }
-
+        _vs_state[chat_id] = {"op": op, "video_url": url, "status_msg": cq.message}
         if op == "compress":
-            try:
-                await cq.message.edit_text(
-                    f"🗜 <b>COMPRESS VIDEO</b>\n{_SEP}\n\n"
-                    f"{_field('🎬', 'URL', url[:40])}\n\n"
-                    f"<b>Pick quality:</b>",
-                    reply_markup=kb_quality(),
-                )
+            try: await cq.message.edit_text(f"🗜 <b>COMPRESS VIDEO</b>\n{_SEP}\n\n{_field('🎬', 'URL', url[:40])}\n\n<b>Pick quality:</b>", reply_markup=kb_quality())
             except Exception: pass
-
         elif op == "resolution":
-            try:
-                await cq.message.edit_text(
-                    f"📐 <b>CHANGE RESOLUTION</b>\n{_SEP}\n\n"
-                    f"{_field('🎬', 'URL', url[:40])}\n\n"
-                    f"<b>Pick target resolution:</b>",
-                    reply_markup=kb_resolution(),
-                )
+            try: await cq.message.edit_text(f"📐 <b>CHANGE RESOLUTION</b>\n{_SEP}\n\n{_field('🎬', 'URL', url[:40])}\n\n<b>Pick target resolution:</b>", reply_markup=kb_resolution())
             except Exception: pass
-
         elif op == "burnsub":
-            try:
-                await cq.message.edit_text(
-                    f"💬 <b>BURN SUBTITLES</b>\n{_SEP}\n\n"
-                    f"{_field('🎬', 'Video', url[:40])}\n\n"
-                    f"<b>Send the subtitle URL (.srt/.ass):</b>",
-                    reply_markup=kb_back(),
-                )
+            try: await cq.message.edit_text(f"💬 <b>BURN SUBTITLES</b>\n{_SEP}\n\n{_field('🎬', 'Video', url[:40])}\n\n<b>Send the subtitle URL (.srt/.ass):</b>", reply_markup=kb_back())
             except Exception: pass
         return
 
@@ -790,13 +558,8 @@ async def callbacks(client, cq):
         if not session: await cq.answer("Session expired.", show_alert=True); return
         parts = data.split("_"); kind = parts[2]; idx = int(parts[3])
         stream = (session["video"] if kind=="video" else session["audio"] if kind=="audio" else session["subs"])[idx]
-        await cq.message.edit_text(
-            f"⬇️ <b>DOWNLOADING STREAM</b>\n"
-            f"{_SEP}\n\n"
-            f"{_field('🎯', 'Type', kind.upper())}\n"
-            f"<code>{stream['label'][:50]}</code>",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
-        )
+        await cq.message.edit_text(f"⬇️ <b>DOWNLOADING STREAM</b>\n{_SEP}\n\n{_field('🎯', 'Type', kind.upper())}\n<code>{stream['label'][:50]}</code>",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]))
         MSG.status_msg = cq.message
         os.makedirs(Paths.down_path, exist_ok=True)
         try:
@@ -812,56 +575,24 @@ async def callbacks(client, cq):
             except Exception: pass
         return
 
-    # ── Video ops from uploaded file ─────────
     if data in ["vf_compress", "vf_resolution", "vf_burnsub", "vf_forward"]:
         from colab_leecher.video_studio import _vs_state as _vss, kb_quality, kb_resolution, kb_back, _do_compress, _do_resolution, _do_burnsub
-        st = _vss.get(chat_id, {})
-        file_msg = st.get("file_message")
-        status   = st.get("status_msg") or cq.message
-
-        if not file_msg:
-            await cq.answer("File session expired.", show_alert=True)
-            return
-
+        st = _vss.get(chat_id, {}); file_msg = st.get("file_message"); status = st.get("status_msg") or cq.message
+        if not file_msg: await cq.answer("File session expired.", show_alert=True); return
         if data == "vf_forward":
-            try:
-                await file_msg.copy(chat_id=OWNER)
-                await status.delete()
-            except Exception as e:
-                await status.edit_text(f"❌ {e}")
-            _vss.pop(chat_id, None)
-            return
-
+            try: await file_msg.copy(chat_id=OWNER); await status.delete()
+            except Exception as e: await status.edit_text(f"❌ {e}")
+            _vss.pop(chat_id, None); return
         op_map = {"vf_compress": "compress", "vf_resolution": "resolution", "vf_burnsub": "burnsub"}
-        op = op_map[data]
-        _vss[chat_id]["op"] = op
-        _vss[chat_id]["status_msg"] = cq.message
-        # For file ops we set a special flag so video_studio knows to download from Telegram
-        _vss[chat_id]["use_tg_file"] = True
-
+        op = op_map[data]; _vss[chat_id]["op"] = op; _vss[chat_id]["status_msg"] = cq.message; _vss[chat_id]["use_tg_file"] = True
         if op == "compress":
-            try:
-                await cq.message.edit_text(
-                    f"🗜 <b>COMPRESS VIDEO</b>\n{_SEP}\n\n"
-                    f"<b>Pick quality:</b>",
-                    reply_markup=kb_quality(),
-                )
+            try: await cq.message.edit_text(f"🗜 <b>COMPRESS VIDEO</b>\n{_SEP}\n\n<b>Pick quality:</b>", reply_markup=kb_quality())
             except Exception: pass
         elif op == "resolution":
-            try:
-                await cq.message.edit_text(
-                    f"📐 <b>CHANGE RESOLUTION</b>\n{_SEP}\n\n"
-                    f"<b>Pick target resolution:</b>",
-                    reply_markup=kb_resolution(),
-                )
+            try: await cq.message.edit_text(f"📐 <b>CHANGE RESOLUTION</b>\n{_SEP}\n\n<b>Pick target resolution:</b>", reply_markup=kb_resolution())
             except Exception: pass
         elif op == "burnsub":
-            try:
-                await cq.message.edit_text(
-                    f"💬 <b>BURN SUBTITLES</b>\n{_SEP}\n\n"
-                    f"<b>Send the subtitle URL (.srt/.ass):</b>",
-                    reply_markup=kb_back(),
-                )
+            try: await cq.message.edit_text(f"💬 <b>BURN SUBTITLES</b>\n{_SEP}\n\n<b>Send the subtitle URL (.srt/.ass):</b>", reply_markup=kb_back())
             except Exception: pass
         return
 
@@ -869,42 +600,27 @@ async def callbacks(client, cq):
     if data == "video":
         await cq.message.edit_text(
             f"🎥 <b>VIDEO SETTINGS</b>\n{_SEP}\n\n"
-            f"{_field('🔄', 'Convert', BOT.Setting.convert_video)}\n"
-            f"{_field('✂', 'Split', BOT.Setting.split_video)}\n"
-            f"{_field('🎬', 'Format', BOT.Options.video_out.upper())}\n"
-            f"{_field('📊', 'Quality', BOT.Setting.convert_quality)}\n\n{_SEP}",
+            f"{_field('🔄', 'Convert', BOT.Setting.convert_video)}\n{_field('✂', 'Split', BOT.Setting.split_video)}\n"
+            f"{_field('🎬', 'Format', BOT.Options.video_out.upper())}\n{_field('📊', 'Quality', BOT.Setting.convert_quality)}\n\n{_SEP}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✂ Split",    callback_data="split-true"),
-                 InlineKeyboardButton("🗜 Zip",      callback_data="split-false")],
-                [InlineKeyboardButton("🔄 Convert", callback_data="convert-true"),
-                 InlineKeyboardButton("🚫 Skip",    callback_data="convert-false")],
-                [InlineKeyboardButton("🎬 MP4",     callback_data="mp4"),
-                 InlineKeyboardButton("📦 MKV",     callback_data="mkv")],
-                [InlineKeyboardButton("🔝 High",    callback_data="q-High"),
-                 InlineKeyboardButton("📉 Low",     callback_data="q-Low")],
-                [InlineKeyboardButton("⏎ Back",     callback_data="back")],
+                [InlineKeyboardButton("✂ Split", callback_data="split-true"), InlineKeyboardButton("🗜 Zip", callback_data="split-false")],
+                [InlineKeyboardButton("🔄 Convert", callback_data="convert-true"), InlineKeyboardButton("🚫 Skip", callback_data="convert-false")],
+                [InlineKeyboardButton("🎬 MP4", callback_data="mp4"), InlineKeyboardButton("📦 MKV", callback_data="mkv")],
+                [InlineKeyboardButton("🔝 High", callback_data="q-High"), InlineKeyboardButton("📉 Low", callback_data="q-Low")],
+                [InlineKeyboardButton("⏎ Back", callback_data="back")],
             ]))
     elif data == "caption":
-        await cq.message.edit_text(
-            f"✏️ <b>CAPTION STYLE</b>\n{_SEP}\n\n"
-            f"{_field('📝', 'Current', BOT.Setting.caption)}\n\n{_SEP}",
+        await cq.message.edit_text(f"✏️ <b>CAPTION STYLE</b>\n{_SEP}\n\n{_field('📝', 'Current', BOT.Setting.caption)}\n\n{_SEP}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Monospace", callback_data="code-Monospace"),
-                 InlineKeyboardButton("Bold",      callback_data="b-Bold")],
-                [InlineKeyboardButton("Italic",    callback_data="i-Italic"),
-                 InlineKeyboardButton("Underline", callback_data="u-Underlined")],
-                [InlineKeyboardButton("Regular",   callback_data="p-Regular")],
-                [InlineKeyboardButton("⏎ Back",    callback_data="back")],
+                [InlineKeyboardButton("Monospace", callback_data="code-Monospace"), InlineKeyboardButton("Bold", callback_data="b-Bold")],
+                [InlineKeyboardButton("Italic", callback_data="i-Italic"), InlineKeyboardButton("Underline", callback_data="u-Underlined")],
+                [InlineKeyboardButton("Regular", callback_data="p-Regular")],
+                [InlineKeyboardButton("⏎ Back", callback_data="back")],
             ]))
     elif data == "thumb":
         await cq.message.edit_text(
-            f"🖼 <b>THUMBNAIL</b>\n{_SEP}\n\n"
-            f"{_field('📷', 'Status', '✅ Set' if BOT.Setting.thumbnail else '❌ None')}\n"
-            f"<i>Send image to update.</i>\n\n{_SEP}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑 Delete", callback_data="del-thumb")],
-                [InlineKeyboardButton("⏎ Back",   callback_data="back")],
-            ]))
+            f"🖼 <b>THUMBNAIL</b>\n{_SEP}\n\n{_field('📷', 'Status', '✅ Set' if BOT.Setting.thumbnail else '❌ None')}\n<i>Send image to update.</i>\n\n{_SEP}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Delete", callback_data="del-thumb")], [InlineKeyboardButton("⏎ Back", callback_data="back")]]))
     elif data == "del-thumb":
         if BOT.Setting.thumbnail:
             try: os.remove(Paths.THMB_PATH)
@@ -912,164 +628,116 @@ async def callbacks(client, cq):
         BOT.Setting.thumbnail = False
         await send_settings(client, cq.message, cq.message.id, False)
     elif data == "set-prefix":
-        await cq.message.edit_text(f"✏️ <b>Reply with PREFIX text:</b>\n{_SEP}")
-        BOT.State.prefix = True
+        await cq.message.edit_text(f"✏️ <b>Reply with PREFIX text:</b>\n{_SEP}"); BOT.State.prefix = True
     elif data == "set-suffix":
-        await cq.message.edit_text(f"✏️ <b>Reply with SUFFIX text:</b>\n{_SEP}")
-        BOT.State.suffix = True
+        await cq.message.edit_text(f"✏️ <b>Reply with SUFFIX text:</b>\n{_SEP}"); BOT.State.suffix = True
     elif data in ["code-Monospace","p-Regular","b-Bold","i-Italic","u-Underlined"]:
         r = data.split("-"); BOT.Options.caption = r[0]; BOT.Setting.caption = r[1]
         await send_settings(client, cq.message, cq.message.id, False)
     elif data in ["split-true","split-false"]:
-        BOT.Options.is_split    = data == "split-true"
-        BOT.Setting.split_video = "Split" if data == "split-true" else "Zip"
+        BOT.Options.is_split = data == "split-true"; BOT.Setting.split_video = "Split" if data == "split-true" else "Zip"
         await send_settings(client, cq.message, cq.message.id, False)
     elif data in ["convert-true","convert-false","mp4","mkv","q-High","q-Low"]:
-        if   data == "convert-true":  BOT.Options.convert_video=True;  BOT.Setting.convert_video="Yes"
+        if data == "convert-true": BOT.Options.convert_video=True; BOT.Setting.convert_video="Yes"
         elif data == "convert-false": BOT.Options.convert_video=False; BOT.Setting.convert_video="No"
         elif data == "q-High": BOT.Setting.convert_quality="High"; BOT.Options.convert_quality=True
-        elif data == "q-Low":  BOT.Setting.convert_quality="Low";  BOT.Options.convert_quality=False
+        elif data == "q-Low": BOT.Setting.convert_quality="Low"; BOT.Options.convert_quality=False
         else: BOT.Options.video_out = data
         await send_settings(client, cq.message, cq.message.id, False)
     elif data in ["media","document"]:
-        BOT.Options.stream_upload = data == "media"
-        BOT.Setting.stream_upload = "Media" if data == "media" else "Document"
+        BOT.Options.stream_upload = data == "media"; BOT.Setting.stream_upload = "Media" if data == "media" else "Document"
         await send_settings(client, cq.message, cq.message.id, False)
-    elif data == "close":
-        await cq.message.delete()
-    elif data == "back":
-        await send_settings(client, cq.message, cq.message.id, False)
-    elif data == "cancel":
-        await cancelTask("Annulé par l'utilisateur")
+    elif data == "close": await cq.message.delete()
+    elif data == "back": await send_settings(client, cq.message, cq.message.id, False)
+    elif data == "cancel": await cancelTask("Annulé par l'utilisateur")
 
-    # ── Channel copy callbacks ─────────────────
     elif data == "ch_skip":
         try: await cq.message.delete()
         except Exception: pass
-
-    elif data == "ch_none":
-        await cq.answer("Add channels with /addchannel", show_alert=True)
-
+    elif data == "ch_none": await cq.answer("Add channels with /addchannel", show_alert=True)
     elif data.startswith("ch_rm_"):
         try:
-            ch_id = int(data.split("_")[2])
-            remove_channel(ch_id)
-            # Refresh the channels list message
+            ch_id = int(data.split("_")[2]); remove_channel(ch_id)
             channels = get_channels()
             if not channels:
-                await cq.message.edit_text(
-                    f"📺 <b>SAVED CHANNELS</b>\n{_SEP}\n\n"
-                    f"<i>No channels saved.</i>\n\n{_SEP}"
-                )
+                await cq.message.edit_text(f"📺 <b>SAVED CHANNELS</b>\n{_SEP}\n\n<i>No channels saved.</i>\n\n{_SEP}")
             else:
                 lines = ["📺 <b>SAVED CHANNELS</b>", _SEP]
                 for c in channels:
                     icon = "📢" if c["type"] == "public" else "🔒"
-                    lines.append(f"\n{icon} <b>{c['label']}</b>")
-                    lines.append(f"    🆔 <code>{c['id']}</code>")
-                    
-                
-                await cq.message.edit_text(
-                    "\n".join(lines),
-                    reply_markup=kb_channel_manage()
-                )
+                    lines.append(f"\n{icon} <b>{c['label']}</b>"); lines.append(f"    🆔 <code>{c['id']}</code>")
+                await cq.message.edit_text("\n".join(lines), reply_markup=kb_channel_manage())
             await cq.answer("Channel removed ✅")
-        except Exception as e:
-            await cq.answer(f"Error: {e}", show_alert=True)
-
+        except Exception as e: await cq.answer(f"Error: {e}", show_alert=True)
     elif data.startswith("ch_copy_"):
-        # ch_copy_<channel_id>_<msg_id1>,<msg_id2>,...
-        parts    = data.split("_", 3)
-        ch_id    = int(parts[2])
-        msg_ids  = [int(x) for x in parts[3].split(",") if x]
+        parts = data.split("_", 3); ch_id = int(parts[2]); msg_ids = [int(x) for x in parts[3].split(",") if x]
         await _do_channel_copy(cq, [ch_id], msg_ids)
-
     elif data.startswith("ch_all_"):
-        # ch_all_<msg_id1>,<msg_id2>,...
-        ids_str = data[len("ch_all_"):]
-        msg_ids = [int(x) for x in ids_str.split(",") if x]
-        ch_ids  = [c["id"] for c in get_channels()]
+        ids_str = data[len("ch_all_"):]; msg_ids = [int(x) for x in ids_str.split(",") if x]
+        ch_ids = [c["id"] for c in get_channels()]
         await _do_channel_copy(cq, ch_ids, msg_ids)
 
 
-async def _do_channel_copy(cq, channel_ids: list, msg_ids: list):
-    """Forward the uploaded messages (by ID from OWNER chat) to each channel silently."""
-    total   = len(channel_ids) * len(msg_ids)
-    success = 0
-    failed  = []
-
+async def _do_channel_copy(cq, channel_ids, msg_ids):
+    total = len(channel_ids) * len(msg_ids); success = 0; failed = []
     for ch_id in channel_ids:
         for msg_id in msg_ids:
             try:
-                await colab_bot.forward_messages(
-                    chat_id=ch_id,
-                    from_chat_id=OWNER,
-                    message_ids=msg_id,
-                    drop_author=True,      # silent — no "forwarded from" header
-                )
+                await colab_bot.forward_messages(chat_id=ch_id, from_chat_id=OWNER, message_ids=msg_id, drop_author=True)
                 success += 1
-            except Exception as e:
-                logging.warning(f"[ChannelCopy] {ch_id} msg {msg_id}: {e}")
-                failed.append(str(ch_id))
-
-    # Build result card
+            except Exception as e: logging.warning(f"[ChannelCopy] {ch_id} msg {msg_id}: {e}"); failed.append(str(ch_id))
     ch_labels = []
     for cid in channel_ids:
-        c = get_channels()
-        found = next((x for x in c if x["id"] == cid), None)
+        c = get_channels(); found = next((x for x in c if x["id"] == cid), None)
         ch_labels.append(found["label"] if found else str(cid))
-
     if failed:
-        result_text = (
-            f"⚠️ <b>COPY PARTIAL</b>\n{_SEP}\n\n"
-            f"{_field('✅', 'Sent', str(success))}\n"
-            f"{_field('❌', 'Failed', str(len(failed)))}\n\n{_SEP}"
-            f"{_SEP}"
-        )
+        result_text = f"⚠️ <b>COPY PARTIAL</b>\n{_SEP}\n\n{_field('✅', 'Sent', str(success))}\n{_field('❌', 'Failed', str(len(failed)))}\n\n{_SEP}"
     else:
         dest = ", ".join(ch_labels[:3])
         if len(ch_labels) > 3: dest += f" +{len(ch_labels)-3}"
-        result_text = (
-            f"✅ <b>COPIED TO CHANNEL</b>\n{_SEP}\n\n"
-            f"{_field('📁', 'Files', str(success))}\n"
-            f"{_field('📺', 'Dest', dest[:28])}\n\n{_SEP}"
-            f"{_SEP}"
-        )
-    try:
-        await cq.message.edit_text(result_text)
-    except Exception:
-        await colab_bot.send_message(chat_id=OWNER, text=result_text)
+        result_text = f"✅ <b>COPIED TO CHANNEL</b>\n{_SEP}\n\n{_field('📁', 'Files', str(success))}\n{_field('📺', 'Dest', dest[:28])}\n\n{_SEP}"
+    try: await cq.message.edit_text(result_text)
+    except Exception: await colab_bot.send_message(chat_id=OWNER, text=result_text)
 
 
 async def _show_sx_menu(msg, session):
     v = len(session["video"]); a = len(session["audio"]); s = len(session["subs"])
     title = session["title"][:28]
     await msg.edit_text(
-        f"🎞 <b>STREAM EXTRACTOR</b>\n"
-        f"{_SEP}\n\n"
-        f"📌 <b>{title}</b>\n\n"
-        f"{_field('🎬', 'Video', str(v))}\n"
-        f"{_field('🎵', 'Audio', str(a))}\n"
-        f"{_field('💬', 'Subs',  str(s))}\n\n"
-        f"{_SEP}\n"
-        f"<b>Select stream type:</b>",
-        reply_markup=kb_type(v, a, s)
-    )
+        f"🎞 <b>STREAM EXTRACTOR</b>\n{_SEP}\n\n📌 <b>{title}</b>\n\n"
+        f"{_field('🎬', 'Video', str(v))}\n{_field('🎵', 'Audio', str(a))}\n{_field('💬', 'Subs', str(s))}\n\n"
+        f"{_SEP}\n<b>Select stream type:</b>",
+        reply_markup=kb_type(v, a, s))
 
-# ══════════════════════════════════════════════
-#  Photo → thumbnail
-# ══════════════════════════════════════════════
 @colab_bot.on_message(filters.photo & filters.private)
 async def handle_photo(client, message):
     msg = await message.reply_text(f"🖼 <b>Saving thumbnail...</b>\n{_SEP}")
     if await setThumbnail(message):
-        await msg.edit_text(f"✅ <b>THUMBNAIL UPDATED</b>\n{_SEP}")
-        await message.delete()
+        await msg.edit_text(f"✅ <b>THUMBNAIL UPDATED</b>\n{_SEP}"); await message.delete()
+    else: await msg.edit_text(f"❌ <b>Failed to set thumbnail</b>\n{_SEP}")
+    await sleep(10); await message_deleter(message, msg)
+
+
+# ══════════════════════════════════════════════
+#  BOOT — dispatcher + CloudConvert webhook
+# ══════════════════════════════════════════════
+from colab_leecher.cloudconvert_hook import start_webhook_server
+
+async def _boot():
+    """Boot dispatcher + webhook server, then start Pyrogram."""
+    await ensure_dispatcher()
+
+    # Configure webhook secret if provided
+    if CC_WEBHOOK_SECRET:
+        cc_hook.WEBHOOK_SECRET = CC_WEBHOOK_SECRET
+
+    # Start webhook server + ngrok tunnel
+    if NGROK_TOKEN:
+        await start_webhook_server(port=8765, ngrok_token=NGROK_TOKEN)
+        logging.info("☁️ CloudConvert webhook server started")
     else:
-        await msg.edit_text(f"❌ <b>Failed to set thumbnail</b>\n{_SEP}")
-    await sleep(10)
-    await message_deleter(message, msg)
+        logging.info("⚠️ No NGROK_TOKEN — CloudConvert webhook disabled")
 
 logging.info("⚡ Video Studio AI started.")
-get_event_loop().run_until_complete(ensure_dispatcher())
+get_event_loop().run_until_complete(_boot())
 colab_bot.run()
