@@ -5,6 +5,8 @@ API_HASH  = ""   # @param {type: "string"}
 BOT_TOKEN = ""  # @param {type: "string"}
 USER_ID   = 0                           # @param {type: "integer"}
 DUMP_ID   = 0                                     # @param {type: "integer"} — unused, keep as 0
+NGROK_TOKEN = ""                                   # @param {type: "string"} — get from ngrok.com (free)
+CC_WEBHOOK_SECRET = ""                             # @param {type: "string"} — optional: from CloudConvert webhook settings
 
 import subprocess, time, json, shutil, os
 from IPython.display import clear_output
@@ -13,12 +15,12 @@ from threading import Thread
 Working = True
 
 banner = '''
- ███████╗██╗██╗██╗      ██████╗ ███╗   ██╗ ██████╗
- ╚══███╔╝██║██║██║     ██╔═══██╗████╗  ██║██╔════╝
-   ███╔╝ ██║██║██║     ██║   ██║██╔██╗ ██║██║  ███╗
-  ███╔╝  ██║██║██║     ██║   ██║██║╚██╗██║██║   ██║
- ███████╗██║██║███████╗╚██████╔╝██║ ╚████║╚██████╔╝
- ╚══════╝╚═╝╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝
+ ███████╗██╗██╗      ██████╗ ███╗   ██╗ ██████╗
+ ╚══███╔╝██║██║     ██╔═══██╗████╗  ██║██╔════╝
+   ███╔╝ ██║██║     ██║   ██║██╔██╗ ██║██║  ███╗
+  ███╔╝  ██║██║     ██║   ██║██║╚██╗██║██║   ██║
+ ███████╗██║███████╗╚██████╔╝██║ ╚████║╚██████╔╝
+ ╚══════╝╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝
 
   ██████╗ ██████╗ ██████╗ ███████╗
  ██╔════╝██╔═══██╗██╔══██╗██╔════╝
@@ -47,14 +49,16 @@ if os.path.exists("/content/sample_data"):
 
 subprocess.run("git clone https://github.com/vicMenma/zilong.git", shell=True)
 subprocess.run("apt update && apt install -y ffmpeg aria2", shell=True)
-subprocess.run("pip3 install -r /content/zilong/requirements.txt", shell=True)
+subprocess.run("pip3 install -r /content/zilong/requirements.txt pyngrok aiohttp", shell=True)
 
 credentials = {
-    "API_ID":    API_ID,
-    "API_HASH":  API_HASH,
-    "BOT_TOKEN": BOT_TOKEN,
-    "USER_ID":   USER_ID,
-    "DUMP_ID":   DUMP_ID,
+    "API_ID":            API_ID,
+    "API_HASH":          API_HASH,
+    "BOT_TOKEN":         BOT_TOKEN,
+    "USER_ID":           USER_ID,
+    "DUMP_ID":           DUMP_ID,
+    "NGROK_TOKEN":       NGROK_TOKEN,
+    "CC_WEBHOOK_SECRET": CC_WEBHOOK_SECRET,
 }
 
 with open('/content/zilong/credentials.json', 'w') as f:
