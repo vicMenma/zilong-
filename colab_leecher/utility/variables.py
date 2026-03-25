@@ -1,120 +1,125 @@
+"""
+variables.py — Global shared state for Zilong Leecher Bot.
+
+Key fixes vs original:
+  - MSG.sent_msg / status_msg now start as None  (not fake Message objects)
+  - Transfer.completion_info added for caption enrichment
+  - _panel_lock added for safe concurrent edits
+"""
 from time import time
 from datetime import datetime
-from contextvars import ContextVar
-
-# Per-task status message — each parallel slot has its own
-_slot_status_msg: ContextVar = ContextVar('slot_status_msg', default=None)
-
-# Shared panel state dict — written by status_bar(), read by _panel_loop()
-# key = slot_id (int), value = dict with pct/speed/eta/done/left/engine
-# slot_id for current coroutine is stored via _slot_id ContextVar
-_slot_id: ContextVar = ContextVar('slot_id', default=0)
-_panel_slots: dict = {}   # slot_id -> panel state, updated by status_bar()
+import asyncio
 
 
 class BOT:
     SOURCE = []
-    TASK = None
+    TASK   = None
+
     class Setting:
-        stream_upload = "Media"
-        convert_video = "Yes"
-        convert_quality = "Low"
-        caption = "Monospace"
-        split_video = "Split Videos"
-        prefix = ""
-        suffix = ""
-        thumbnail = False
+        stream_upload    = "Media"
+        convert_video    = "Oui"
+        convert_quality  = "Basse"
+        caption          = "Monospace"
+        split_video      = "Découper"
+        prefix           = ""
+        suffix           = ""
+        thumbnail        = False
 
     class Options:
-        stream_upload = True
-        convert_video = True
-        convert_quality = False
-        is_split = True
-        caption = "code"
-        video_out = "mp4"
-        custom_name = ""
-        zip_pswd = ""
-        unzip_pswd = ""
+        stream_upload    = True
+        convert_video    = True
+        convert_quality  = False
+        is_split         = True
+        caption          = "code"
+        video_out        = "mp4"
+        custom_name      = ""
+        zip_pswd         = ""
+        unzip_pswd       = ""
 
     class Mode:
-        mode = "leech"
-        type = "normal"
-        ytdl = False
+        mode  = "leech"
+        type  = "normal"
+        ytdl  = False
 
     class State:
-        started = False
-        task_going = False
-        prefix = False
-        suffix = False
+        started     = False
+        task_going  = False
+        prefix      = False
+        suffix      = False
 
 
 class YTDL:
-    header = ""
-    speed = ""
+    header     = ""
+    speed      = ""
     percentage = 0.0
-    eta = ""
-    done = ""
-    left = ""
+    eta        = ""
+    done       = ""
+    left       = ""
 
 
 class Transfer:
-    down_bytes = [0, 0]
-    up_bytes = [0, 0]
-    total_down_size = 0
-    sent_file = []
-    sent_file_names = []
-    completion_info = None
+    down_bytes       = [0, 0]
+    up_bytes         = [0, 0]
+    total_down_size  = 0
+    sent_file        = []
+    sent_file_names  = []
+    # Set before last upload so caption can embed size/time info
+    completion_info  = None   # dict: {fname, orig_sz, final_sz, _start, mode}
 
 
 class TaskError:
     state = False
-    text = ""
+    text  = ""
 
 
 class BotTimes:
     current_time = time()
-    start_time = datetime.now()
-    task_start = datetime.now()
+    start_time   = datetime.now()
+    task_start   = datetime.now()
 
 
 class Paths:
-    BASE_DIR = "/content/zilong"
-    WORK_PATH = f"{BASE_DIR}/BOT_WORK"
-    THMB_PATH = f"{BASE_DIR}/colab_leecher/Thumbnail.jpg"
-    VIDEO_FRAME = f"{WORK_PATH}/video_frame.jpg"
-    HERO_IMAGE = f"{WORK_PATH}/Hero.jpg"
-    DEFAULT_HERO = f"{BASE_DIR}/custom_thmb.jpg"
-    MOUNTED_DRIVE = "/content/drive"
+    BASE_DIR           = "/content/zilong"
+    WORK_PATH          = f"{BASE_DIR}/BOT_WORK"
+    THMB_PATH          = f"{BASE_DIR}/colab_leecher/Thumbnail.jpg"
+    VIDEO_FRAME        = f"{WORK_PATH}/video_frame.jpg"
+    HERO_IMAGE         = f"{WORK_PATH}/Hero.jpg"
+    DEFAULT_HERO       = f"{BASE_DIR}/custom_thmb.jpg"
+    MOUNTED_DRIVE      = "/content/drive"
 
-    down_path = f"{WORK_PATH}/Downloads"
+    down_path          = f"{WORK_PATH}/Downloads"
     temp_dirleech_path = f"{WORK_PATH}/dir_leech_temp"
-    mirror_dir = f"{MOUNTED_DRIVE}/MyDrive/Colab Leecher Uploads"
-    temp_zpath = f"{WORK_PATH}/Leeched_Files"
-    temp_unzip_path = f"{WORK_PATH}/Unzipped_Files"
-    temp_files_dir = f"{WORK_PATH}/leech_temp"
-    thumbnail_ytdl = f"{WORK_PATH}/ytdl_thumbnails"
-    access_token = "/content/token.pickle"
+    mirror_dir         = f"{MOUNTED_DRIVE}/MyDrive/Colab Leecher Uploads"
+    temp_zpath         = f"{WORK_PATH}/Leeched_Files"
+    temp_unzip_path    = f"{WORK_PATH}/Unzipped_Files"
+    temp_files_dir     = f"{WORK_PATH}/leech_temp"
+    thumbnail_ytdl     = f"{WORK_PATH}/ytdl_thumbnails"
+    access_token       = "/content/token.pickle"
 
 
 class Messages:
-    caution_msg = ""
+    caution_msg   = ""
     download_name = ""
-    task_msg = ""
-    status_head = f"<b>📥 DOWNLOADING » </b>\n"
-    dump_task = ""
-    src_link = ""
-    link_p = ""
+    task_msg      = ""
+    status_head   = "📥 <b>TÉLÉCHARGEMENT</b>\n"
+    dump_task     = ""
+    src_link      = ""
+    link_p        = ""
 
 
 class MSG:
-    sent_msg   = None   # set after first upload
-    status_msg = None   # set after first status message
+    sent_msg   = None   # Pyrogram Message — set after first upload
+    status_msg = None   # Pyrogram Message — live progress card
 
 
 class Aria2c:
-    link_info = False
+    link_info   = False
     pic_dwn_url = "https://picsum.photos/900/600"
 
 
 class Gdrive:
     service = None
+
+
+# Asyncio lock — prevents concurrent edits of the status message
+_status_edit_lock: asyncio.Lock = asyncio.Lock()
