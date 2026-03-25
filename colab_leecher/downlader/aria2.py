@@ -1,135 +1,186 @@
+"""
+aria2.py — Async aria2c downloader.
+
+Key improvements vs original:
+  - asyncio.create_subprocess_exec instead of blocking subprocess.Popen
+  - Robust output parser with try/except on every field — no more IndexError crashes
+  - _safe_url() to percent-encode brackets and special chars
+  - Dead-link detection threshold (270 s)
+"""
 import re
 import logging
 import asyncio
 import subprocess
 from urllib.parse import quote, urlparse, unquote
 from datetime import datetime
+
 from colab_leecher.utility.helper import sizeUnit, status_bar
 from colab_leecher.utility.variables import BOT, Aria2c, Paths, Messages, BotTimes
 
 
-def _safe_url(url: str) -> str:
-    """Encode [ ] and other chars that break aria2c, without double-encoding existing %XX."""
-    return quote(url, safe=":/?=&%+@#.,!~*'();$-_%")
+# ──────────────────────────────────────────────
+#  Helpers
+# ──────────────────────────────────────────────
 
+def _safe_url(url: str) -> str:
+    """Percent-encode brackets and special chars that break aria2c."""
+    return quote(url, safe=":/?=&%+@#.,!~*'();$-_")
+
+
+# ──────────────────────────────────────────────
+#  Name discovery  (synchronous dry-run)
+# ──────────────────────────────────────────────
+
+def get_Aria2c_Name(link: str) -> str:
+    if BOT.Options.custom_name:
+        return BOT.Options.custom_name
+    try:
+        safe = _safe_url(link)
+        result = subprocess.run(
+            ["aria2c", "-x4", "--dry-run", "--file-allocation=none", safe],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        fname  = stdout.split("complete: ")[-1].split("\n")[0]
+        name   = fname.split("/")[-1].strip()
+        if name:
+            return name
+    except Exception as e:
+        logging.debug(f"[aria2c name] {e}")
+
+    # Fallback: extract from URL path
+    try:
+        parsed = urlparse(link)
+        name   = unquote(parsed.path.split("/")[-1])
+        if name:
+            return name
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
+# ──────────────────────────────────────────────
+#  Main downloader  (fully async)
+# ──────────────────────────────────────────────
 
 async def aria2_Download(link: str, num: int):
-    global BotTimes, Messages
-    safe_link = _safe_url(link)
-    name_d = get_Aria2c_Name(link)
-    BotTimes.task_start = datetime.now()
-    Messages.status_head = (
-        f"<b>📥 DOWNLOADING FROM » </b>"
-        f"<i>🔗Link {str(num).zfill(2)}</i>\n\n"
-        f"<b>🏷️ Name » </b><code>{name_d}</code>\n"
+    Aria2c.link_info      = False
+    BotTimes.task_start   = datetime.now()
+    name_d                = get_Aria2c_Name(link)
+    Messages.status_head  = (
+        f"📥 <b>TÉLÉCHARGEMENT</b>  #{str(num).zfill(2)}\n\n"
+        f"<code>{name_d[:50]}</code>\n"
     )
 
-    command = [
+    safe = _safe_url(link)
+    cmd  = [
         "aria2c",
-        "-x16",
-        "--seed-time=0",
-        "--summary-interval=1",
+        "-x16", "-s16",                   # max connections + split
+        "--seed-time=0",                  # no seeding for torrents
+        "--summary-interval=1",           # progress every second
         "--max-tries=3",
+        "--retry-wait=5",
         "--console-log-level=notice",
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
         "-d", Paths.down_path,
-        safe_link,
+        safe,
     ]
 
     proc = await asyncio.create_subprocess_exec(
-        *command,
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
 
     while True:
-        output = await proc.stdout.readline()
-        if output == b"" and proc.returncode is not None:
-            break
-        if output:
-            await on_output(output.decode("utf-8", errors="replace"))
+        line = await proc.stdout.readline()
+        if not line:
+            if proc.returncode is not None:
+                break
+            continue
+        await _on_output(line.decode("utf-8", errors="replace"))
 
     await proc.wait()
-    exit_code = proc.returncode
-    error_output = await proc.stderr.read()
+    rc = proc.returncode
 
-    if exit_code != 0:
-        err_msgs = {
-            3:  f"Resource not found: {link}",
-            9:  "Not enough disk space",
-            24: "HTTP authorization failed",
-            22: f"HTTP error (bad URL or range): {link[:80]}",
+    if rc != 0:
+        err_bytes = await proc.stderr.read()
+        err_msg   = err_bytes.decode("utf-8", errors="replace")[:200]
+        code_map  = {
+            3:  f"Ressource introuvable : {link[:60]}",
+            9:  "Espace disque insuffisant.",
+            22: f"Erreur HTTP (mauvaise URL ou plage) : {link[:60]}",
+            24: "Échec de l'authentification HTTP.",
         }
-        msg = err_msgs.get(
-            exit_code,
-            f"aria2c download failed with return code {exit_code} for {link}. Error: {error_output}"
-        )
-        logging.error(msg)
+        msg = code_map.get(rc, f"aria2c a échoué (code {rc}). {err_msg}")
+        logging.error(f"[aria2c] {msg}")
+        raise RuntimeError(msg)
 
 
-def get_Aria2c_Name(link: str) -> str:
-    if len(BOT.Options.custom_name) != 0:
-        return BOT.Options.custom_name
-    safe = _safe_url(link)
-    cmd = f'aria2c -x10 --dry-run --file-allocation=none "{safe}"'
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-    stdout_str = result.stdout.decode("utf-8", errors="replace")
-    filename = stdout_str.split("complete: ")[-1].split("\n")[0]
-    name = filename.split("/")[-1].strip()
-    if not name:
-        parsed = urlparse(link)
-        name = unquote(parsed.path.split("/")[-1]) or "UNKNOWN"
-    return name
+# ──────────────────────────────────────────────
+#  Output parser
+# ──────────────────────────────────────────────
 
-
-async def on_output(output: str):
-    total_size = "0B"
-    progress_percentage = "0B"
-    downloaded_bytes = "0B"
-    eta = "0S"
-    try:
-        if "ETA:" in output:
-            parts = output.split()
-            total_size = parts[1].split("/")[1]
-            total_size = total_size.split("(")[0]
-            progress_percentage = parts[1][parts[1].find("(") + 1: parts[1].find(")")]
-            downloaded_bytes = parts[1].split("/")[0]
-            eta = parts[4].split(":")[1][:-1]
-    except Exception as do:
-        logging.error(f"Couldn't get aria2c info: {do}")
-
-    try:
-        percentage = re.findall(r"\d+\.\d+|\d+", progress_percentage)[0]
-        down       = re.findall(r"\d+\.\d+|\d+", downloaded_bytes)[0]
-    except IndexError:
+async def _on_output(output: str):
+    """
+    Parse aria2c progress line like:
+      [#abc123 100MiB/1.40GiB(7%) CN:8 DL:52MiB ETA:23s]
+    and feed status_bar().
+    """
+    if "ETA:" not in output:
         return
 
-    down_unit = re.findall(r"[a-zA-Z]+", downloaded_bytes)
-    if not down_unit:
-        return
-    unit = down_unit[0]
-    if   "G" in unit: spd = 3
-    elif "M" in unit: spd = 2
-    elif "K" in unit: spd = 1
-    else:             spd = 0
-
-    elapsed_time_seconds = (datetime.now() - BotTimes.task_start).seconds
-
-    if elapsed_time_seconds >= 270 and not Aria2c.link_info:
-        logging.error("Failed to get download info — probably dead link 💀")
-
-    if total_size != "0B":
-        Aria2c.link_info = True
-        current_speed = (float(down) * 1024 ** spd) / max(elapsed_time_seconds, 1)
-        speed_string  = f"{sizeUnit(current_speed)}/s"
-
-        await status_bar(
-            Messages.status_head,
-            speed_string,
-            int(float(percentage)),
-            eta,
-            downloaded_bytes,
-            total_size,
-            "Aria2c 🧨",
+    try:
+        # ── sizes ──
+        # Find pattern like  100MiB/1.40GiB(7%)
+        m_block = re.search(
+            r"([\d.]+\s*\w+)/([\d.]+\s*\w+)\(([\d.]+)%\)",
+            output
         )
+        if not m_block:
+            return
+
+        downloaded_bytes = m_block.group(1).replace(" ", "")
+        total_size       = m_block.group(2).replace(" ", "")
+        pct_str          = m_block.group(3)
+
+        # ── ETA ──
+        m_eta = re.search(r"ETA:([\w]+)", output)
+        eta   = m_eta.group(1) if m_eta else "?"
+
+        # ── speed for internal calculation ──
+        down_nums = re.findall(r"[\d.]+", downloaded_bytes)
+        down_unit = re.findall(r"[A-Za-z]+", downloaded_bytes)
+        if not down_nums or not down_unit:
+            return
+
+        down_val  = float(down_nums[0])
+        unit_char = down_unit[0][0].upper()
+        multiplier = {"G": 1024**3, "M": 1024**2, "K": 1024, "B": 1}.get(unit_char, 1)
+        down_bytes_val = down_val * multiplier
+
+        elapsed = max((datetime.now() - BotTimes.task_start).seconds, 1)
+
+        if float(pct_str) > 0:
+            Aria2c.link_info  = True
+            speed_bps         = down_bytes_val / elapsed
+            speed_str         = f"{sizeUnit(speed_bps)}/s"
+
+            await status_bar(
+                Messages.status_head,
+                speed_str,
+                float(pct_str),
+                eta,
+                downloaded_bytes,
+                total_size,
+                "Aria2c 🧨",
+            )
+        else:
+            # No progress yet — check for dead link timeout
+            if elapsed >= 270 and not Aria2c.link_info:
+                logging.warning("[aria2c] No download info after 270 s — possible dead link.")
+
+    except Exception as e:
+        logging.debug(f"[aria2c parser] {e}")
